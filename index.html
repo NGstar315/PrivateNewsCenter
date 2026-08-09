@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>实时新闻中心</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+</head>
+<body>
+  <!-- 顶部栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">📰</span>
+      <div>
+        <h1>实时新闻中心</h1>
+        <p class="subtitle">个人版 · 权威一手信源优先 · 国内 + 国外</p>
+      </div>
+    </div>
+    <nav class="top-nav" id="top-nav">
+      <button class="nav-pill active" data-page="news">新闻</button>
+      <button class="nav-pill" data-page="sources">发布者</button>
+      <button class="nav-pill" data-page="viz">可视化</button>
+      <button class="nav-pill" data-page="map">地图</button>
+      <button class="nav-pill" data-page="settings">设置</button>
+    </nav>
+    <div class="top-actions">
+      <span id="last-updated" class="last-updated">尚未刷新</span>
+      <label class="auto-toggle">
+        <input type="checkbox" id="auto-refresh" checked /> 自动刷新
+      </label>
+      <div class="refresh-group">
+        <button id="refresh-news-btn" class="btn-refresh btn-refresh-news" title="仅刷新新闻">↻ 新闻</button>
+        <button id="refresh-hot-btn" class="btn-refresh btn-refresh-hot" title="仅刷新热搜榜单">🔥 榜单</button>
+        <button id="refresh-all-btn" class="btn-refresh btn-refresh-all" title="刷新新闻与榜单">↻ 全部</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 更新提示条 -->
+  <div id="update-banner" class="update-banner hidden">
+    <span class="update-icon">🚀</span>
+    <span id="update-text">发现新版本</span>
+    <span id="update-progress" class="update-progress hidden"></span>
+    <button id="update-download" class="update-btn">更新并重启</button>
+    <button id="update-installer" class="update-btn-link hidden">下载安装包</button>
+    <button id="update-dismiss" class="update-close" title="忽略本次">✕</button>
+  </div>
+
+  <!-- 进度条 -->
+  <div id="progress-wrap" class="progress-wrap hidden">
+    <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+    <span id="progress-text" class="progress-text">准备中…</span>
+  </div>
+
+  <!-- ===== 新闻页面 ===== -->
+  <div id="page-news" class="page active">
+    <!-- 搜索 + 筛选区 -->
+    <section class="filters">
+      <div class="search-row">
+        <div class="search-main">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="search-input" placeholder="搜索标题关键词…" />
+        </div>
+        <div class="search-time">
+          <label>起 <input type="date" id="date-from" /></label>
+          <label>止 <input type="date" id="date-to" /></label>
+          <button id="time-clear" class="btn-ghost">清除时段</button>
+        </div>
+      </div>
+
+      <div class="filter-group" id="region-tabs">
+        <span class="filter-label">地区</span>
+        <button class="chip active" data-region="all">全部</button>
+        <button class="chip" data-region="cn">国内</button>
+        <button class="chip" data-region="foreign">国外</button>
+      </div>
+      <div class="filter-group" id="category-tabs">
+        <span class="filter-label">分类</span>
+        <button class="chip active" data-category="all">全部</button>
+        <button class="chip" data-category="politics">时政·国际</button>
+        <button class="chip" data-category="finance">财经·经济</button>
+        <button class="chip" data-category="tech">科技·数码</button>
+        <button class="chip" data-category="society">社会·民生·健康</button>
+        <button class="chip" data-category="sports">体育</button>
+        <button class="chip" data-category="culture">文化·娱乐</button>
+        <button class="chip" data-category="education">教育</button>
+        <button class="chip" data-category="defense">军事·防务</button>
+        <button class="chip" data-category="environment">环境·气候</button>
+        <button class="chip" data-category="science">科学</button>
+        <button class="chip" data-category="travel">旅游</button>
+        <button class="chip" data-category="auto">汽车</button>
+        <button class="chip" data-category="gaming">游戏·电竞</button>
+        <button class="chip" data-category="realestate">房产</button>
+      </div>
+      <div class="filter-group" id="grade-tabs">
+        <span class="filter-label">信源</span>
+        <button class="chip active" data-grade="all">全部</button>
+        <button class="chip" data-grade="P0">P0 一手</button>
+        <button class="chip" data-grade="P1">P1 可靠</button>
+        <button class="chip" data-grade="P2">P2 参考</button>
+      </div>
+      <div class="filter-group source-filter-group">
+        <span class="filter-label">发布者</span>
+        <button class="chip active" id="src-all" data-src="all">全部</button>
+        <button class="chip" id="src-toggle">选择发布者 ▾</button>
+        <div id="source-filter-chips" class="source-filter-chips hidden"></div>
+      </div>
+    </section>
+
+    <main class="layout">
+      <!-- 新闻流 -->
+      <section class="news-section">
+        <div class="section-head">
+          <h2>新闻流</h2>
+          <span id="news-count" class="count">0 条</span>
+        </div>
+        <div id="news-grid" class="news-grid">
+          <div class="placeholder">点击下方「立即刷新」开始获取最新新闻…</div>
+        </div>
+      </section>
+
+      <!-- 热搜榜 + 日历 -->
+      <aside class="hot-section">
+        <div class="section-head"><h2>热搜榜单</h2></div>
+        <div class="hot-tabs" id="hot-tabs"></div>
+        <div id="hot-list" class="hot-list">
+          <div class="placeholder">刷新后显示热搜…</div>
+        </div>
+        <div class="legend">
+          <h3>信源分级说明</h3>
+          <p><span class="badge P0">P0</span> 一手信源：各国政府 / 官方机构发布、权威媒体官方首发。</p>
+          <p><span class="badge P1">P1</span> 可靠信源：主流通讯社、知名媒体（高度可信）。</p>
+          <p><span class="badge P2">P2</span> 参考信源：聚合平台、社媒热点、转载（热搜榜），仅供参考。</p>
+        </div>
+        <div class="calendar-card">
+          <div class="section-head"><h2>日历</h2></div>
+          <div id="calendar" class="calendar"></div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- ===== 发布者页面 ===== -->
+  <div id="page-sources" class="page">
+    <section class="filters sources-filters">
+      <div class="filter-group" id="src-region-tabs">
+        <span class="filter-label">地区</span>
+        <button class="chip active" data-region="all">全部</button>
+        <button class="chip" data-region="cn">国内</button>
+        <button class="chip" data-region="us">美国</button>
+        <button class="chip" data-region="uk">英国</button>
+        <button class="chip" data-region="eu">欧盟</button>
+        <button class="chip" data-region="jp">日本</button>
+        <button class="chip" data-region="intl">国际机构</button>
+      </div>
+      <div class="filter-group" id="src-grade-tabs">
+        <span class="filter-label">等级</span>
+        <button class="chip active" data-grade="all">全部</button>
+        <button class="chip" data-grade="P0">P0</button>
+        <button class="chip" data-grade="P1">P1</button>
+        <button class="chip" data-grade="P2">P2</button>
+      </div>
+      <div class="filter-group" id="src-lean-tabs">
+        <span class="filter-label">倾向</span>
+        <button class="chip active" data-lean="all">全部</button>
+        <button class="chip" data-lean="official">官方</button>
+        <button class="chip" data-lean="state">国营</button>
+        <button class="chip" data-lean="neutral">中立</button>
+        <button class="chip" data-lean="liberal">自由派</button>
+        <button class="chip" data-lean="left">偏左</button>
+      </div>
+      <div class="filter-group search-group">
+        <input type="text" id="src-search-input" placeholder="搜索发布者名称或国家…" />
+      </div>
+    </section>
+
+    <main class="sources-layout">
+      <div class="section-head">
+        <h2>发布者与机构</h2>
+        <span id="sources-count" class="count">0 个</span>
+        <span class="hint">（点击任意发布者卡片可访问其官网）</span>
+        <div class="src-actions">
+          <button id="delete-source-btn" class="btn-secondary">🗑 删除发布者</button>
+          <button id="add-source-btn" class="btn-primary">＋ 添加信源</button>
+        </div>
+      </div>
+      <div id="sources-grid" class="sources-grid">
+        <div class="placeholder">正在加载发布者资料…</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ===== 可视化页面 ===== -->
+  <div id="page-viz" class="page">
+    <section class="filters">
+      <div class="filter-group" id="viz-range">
+        <span class="filter-label">时间范围</span>
+        <button class="chip active" data-range="all">全部</button>
+        <button class="chip" data-range="7">近 7 天</button>
+        <button class="chip" data-range="30">近 30 天</button>
+      </div>
+    </section>
+    <main class="viz-layout">
+      <div class="viz-card">
+        <h3>按领域分布</h3>
+        <canvas id="chart-category"></canvas>
+      </div>
+      <div class="viz-card">
+        <h3>按地区分布</h3>
+        <canvas id="chart-region"></canvas>
+      </div>
+      <div class="viz-card">
+        <h3>按发布者（Top 10）</h3>
+        <canvas id="chart-source"></canvas>
+      </div>
+      <div class="viz-card">
+        <h3>按国家分布</h3>
+        <canvas id="chart-country"></canvas>
+      </div>
+      <div class="viz-card wide">
+        <h3>每日新闻数量趋势</h3>
+        <canvas id="chart-trend"></canvas>
+      </div>
+    </main>
+  </div>
+
+  <!-- ===== 地图页面 ===== -->
+  <div id="page-map" class="page">
+    <div class="dev-placeholder">
+      <div class="dev-placeholder-icon">🗺️</div>
+      <h2>地图模块正在开发中</h2>
+      <p>该模块将支持在地图上查看新闻事发地、发布者总部及行政边界。</p>
+      <p class="dev-placeholder-hint">敬请期待后续版本。已填写的地图 API Key 与样式 ID 会保留在设置中。</p>
+    </div>
+  </div>
+
+  <!-- ===== 设置页面 ===== -->
+  <div id="page-settings" class="page">
+    <main class="settings-layout">
+      <!-- 左栏：常规设置 -->
+      <div class="settings-col">
+        <div class="settings-card">
+          <h3>运作机制</h3>
+          <label class="set-row">
+            <span>自动刷新</span>
+            <span class="ios-toggle"><input type="checkbox" id="set-auto-refresh" /><span class="toggle-track"></span></span>
+          </label>
+          <label class="set-row">
+            <span>启动时自动刷新</span>
+            <span class="ios-toggle"><input type="checkbox" id="set-auto-start" /><span class="toggle-track"></span></span>
+          </label>
+          <label class="set-row">
+            <span>刷新间隔（分钟）</span>
+            <input type="number" id="set-refresh-interval" min="1" max="240" value="30" />
+          </label>
+          <label class="set-row">
+            <span>新闻获取模式</span>
+            <select id="set-fetch-mode">
+              <option value="min">最小性能占用（串行）</option>
+              <option value="balanced">平衡（推荐）</option>
+              <option value="max">最高速度（高并发）</option>
+            </select>
+          </label>
+          <p class="set-hint">最小性能占用 = 串行抓取（最省资源）；平衡 = 适中并发 + 条件请求；最高速度 = 高并发 + 条件请求，刷新最快但占用更多资源。</p>
+        </div>
+
+        <div class="settings-card">
+          <h3>显示与内容</h3>
+          <label class="set-row">
+            <span>新闻增量刷新动画</span>
+            <span class="ios-toggle"><input type="checkbox" id="set-animations" /><span class="toggle-track"></span></span>
+          </label>
+          <label class="set-row">
+            <span>日历水波动画</span>
+            <span class="ios-toggle"><input type="checkbox" id="set-calendar-wave" /><span class="toggle-track"></span></span>
+          </label>
+          <label class="set-row">
+            <span>智能正文清理</span>
+            <span class="ios-toggle"><input type="checkbox" id="set-smart-clean" /><span class="toggle-track"></span></span>
+          </label>
+          <p class="set-hint">动画开启后会更生动；低性能设备或系统「减弱动态效果」时会自动停用。正文清理若误伤某些信源，可临时关闭。</p>
+        </div>
+
+        <div class="settings-card">
+          <h3>缓存与后台</h3>
+          <label class="set-row">
+            <span>图片缓存策略</span>
+            <select id="set-image-caching">
+              <option value="all">缓存所有新闻图片</option>
+              <option value="favorites">仅收藏的新闻</option>
+              <option value="off">关闭图片缓存</option>
+            </select>
+          </label>
+          <label class="set-row">
+            <span>关闭窗口后后台刷新</span>
+            <span class="ios-toggle"><input type="checkbox" id="set-background-refresh" /><span class="toggle-track"></span></span>
+          </label>
+          <p class="set-hint">开启后台刷新后关闭窗口会缩到托盘继续抓取；关闭则直接退出。图片以 UUID 保存到 data/images/，可离线查看。</p>
+        </div>
+
+        <div class="settings-card">
+          <h3>热搜榜单</h3>
+          <p class="set-hint">勾选要在首页展示并抓取的榜单。</p>
+          <div id="settings-hot" class="settings-hot-grid">
+            <label class="ios-toggle-label"><span class="ios-toggle"><input type="checkbox" data-hot="weibo" /><span class="toggle-track"></span></span> 微博热搜</label>
+            <label class="ios-toggle-label"><span class="ios-toggle"><input type="checkbox" data-hot="baidu" /><span class="toggle-track"></span></span> 百度热搜</label>
+            <label class="ios-toggle-label"><span class="ios-toggle"><input type="checkbox" data-hot="zhihu" /><span class="toggle-track"></span></span> 知乎热榜</label>
+            <label class="ios-toggle-label"><span class="ios-toggle"><input type="checkbox" data-hot="intl" /><span class="toggle-track"></span></span> 国际热榜</label>
+          </div>
+          <label class="set-row" style="margin-top:12px">
+            <span>每榜最大显示条数</span>
+            <input type="number" id="set-hot-maxitems" min="5" max="100" value="30" />
+          </label>
+        </div>
+      </div>
+
+      <!-- 右栏：信源管理（充分利用右侧空间） -->
+      <div class="settings-col">
+        <div class="settings-card source-manage-settings">
+          <div class="set-card-head">
+            <h3>信源管理</h3>
+            <span id="settings-sources-count" class="count">0 个</span>
+          </div>
+          <p class="set-hint">选择要抓取的信源，取消勾选将跳过该源。支持搜索与批量开关。</p>
+          <div class="settings-sources-toolbar">
+            <div class="search-main mini">
+              <span class="search-icon">🔍</span>
+              <input type="text" id="set-sources-search" placeholder="搜索信源名称…" />
+            </div>
+            <button id="set-sources-enable" class="btn-ghost">批量启用</button>
+            <button id="set-sources-disable" class="btn-ghost">批量禁用</button>
+          </div>
+          <div id="settings-sources" class="settings-sources-list"></div>
+        </div>
+      </div>
+
+      <!-- 底部跨栏：两列并排，减少空白 -->
+      <div class="settings-col wide settings-bottom-grid">
+        <div class="settings-card">
+          <h3>地图 API（合规要求）</h3>
+          <p class="set-hint">地图使用合规底图，请在下方填入申请的 Key；未填则地图页不可用。</p>
+          <label class="set-row">
+            <span>服务商</span>
+            <select id="set-geo-provider">
+              <option value="tencent">腾讯地图</option>
+              <option value="amap">高德地图</option>
+              <option value="tianditu">天地图</option>
+            </select>
+          </label>
+          <label class="set-row col">
+            <span>API Key</span>
+            <input type="text" id="set-geo-key" placeholder="在此粘贴你的 Key" />
+          </label>
+          <label class="set-row col">
+            <span>地图样式 ID（可选）</span>
+            <input type="text" id="set-geo-style" placeholder="在控制台创建的个性化样式 ID" />
+          </label>
+        </div>
+
+        <div class="settings-card">
+          <h3>数据与缓存</h3>
+          <label class="set-row col">
+            <span>数据根目录（留空 = 程序目录 data/；修改后重启生效）</span>
+            <input type="text" id="set-datadir" placeholder="留空 = 程序目录下的 data/" />
+          </label>
+          <label class="set-row col">
+            <span>更新源 URL（留空 = 默认 GitHub / Gitee）</span>
+            <input type="text" id="set-update-url" placeholder="https://example.com/version.json" />
+          </label>
+          <label class="set-row col">
+            <span>镜像地址（逗号分隔，可选）</span>
+            <input type="text" id="set-update-mirrors" placeholder="https://mirror1.com/version.json, https://mirror2.com/version.json" />
+          </label>
+          <p class="set-hint">当前版本：<span id="set-current-version">—</span> · 留空时使用内置默认源；配置后用于跨设备或国内网络分发。</p>
+          <p class="set-hint">当前：<span id="set-current-datadir">—</span></p>
+          <div class="cache-stats">
+            <div class="cache-stat"><span class="cache-stat-label">图片缓存</span><span id="stat-image-size" class="cache-stat-val">—</span></div>
+            <div class="cache-stat"><span class="cache-stat-label">新闻缓存</span><span id="stat-news-size" class="cache-stat-val">—</span></div>
+            <div class="cache-stat"><span class="cache-stat-label">图片文件</span><span id="stat-image-files" class="cache-stat-val">—</span></div>
+          </div>
+          <div class="set-row cleanup">
+            <label>清理日期 <input type="date" id="clear-date" /></label>
+            <button id="clear-by-date" class="btn-ghost">按日期</button>
+            <button id="clear-images" class="btn-ghost">清图片</button>
+            <button id="clear-news" class="btn-danger">清新闻缓存</button>
+            <button id="clear-all" class="btn-danger">清空全部</button>
+            <button id="refresh-stats" class="btn-ghost">刷新统计</button>
+            <button id="check-update-btn" class="btn-primary">检查更新</button>
+          </div>
+          <p id="cache-clear-result" class="verify-result"></p>
+          <p id="clear-result" class="verify-result"></p>
+        </div>
+      </div>
+
+      <div class="settings-col wide">
+        <div class="settings-card hint-card">
+          <p class="set-hint">所有修改都会即时自动保存 ✓</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 日历波浪裁剪（objectBoundingBox，0..1 坐标） -->
+  <!-- 注意：SVG 本身不能 display:none/visibility:hidden，否则 clip-path 引用在部分 Chromium 版本会失效 -->
+  <svg width="0" height="0" style="position:absolute;pointer-events:none;overflow:visible" aria-hidden="true">
+    <defs>
+      <clipPath id="cal-wave-clip" clipPathUnits="objectBoundingBox">
+        <path d="M0,0.30 C0.0625,0.30 0.1875,0.16 0.25,0.30 S0.4375,0.44 0.50,0.30 S0.6875,0.44 0.75,0.30 S0.9375,0.30 1,0.30 V1 H0 Z" />
+      </clipPath>
+    </defs>
+  </svg>
+
+  <footer class="footer">
+    <span>数据来自公开 RSS / 官方发布 / 热搜接口，仅供个人阅读。</span>
+  </footer>
+
+  <!-- 文章详情弹窗 -->
+  <div id="article-modal" class="modal hidden">
+    <div class="modal-backdrop" id="modal-backdrop"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <button class="modal-close" id="modal-close" title="关闭">✕</button>
+
+      <div class="modal-hero" id="modal-hero">
+        <div id="modal-cover" class="modal-cover"></div>
+        <div class="modal-hero-info">
+          <div class="modal-badges" id="modal-badges"></div>
+          <h2 id="modal-title"></h2>
+          <div class="modal-meta" id="modal-meta"></div>
+        </div>
+      </div>
+
+      <div class="modal-body" id="modal-body">
+        <div id="modal-content" class="modal-content"></div>
+        <div class="modal-actions">
+          <button id="modal-favorite" class="btn-secondary">☆ 收藏</button>
+          <button id="modal-open-external" class="btn-primary">用浏览器打开原文</button>
+          <button id="modal-close-btn" class="btn-secondary">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 热搜详情弹窗 -->
+  <div id="hot-modal" class="modal hidden">
+    <div class="modal-backdrop" id="hot-backdrop"></div>
+    <div class="modal-card hot-modal-card" role="dialog" aria-modal="true">
+      <button class="modal-close" id="hot-close" title="关闭">✕</button>
+      <div class="modal-body" id="hot-body">
+        <h2 id="hot-title"></h2>
+        <div id="hot-meta" class="modal-meta"></div>
+        <div id="hot-content" class="modal-content"></div>
+        <div class="modal-actions">
+          <button id="hot-open" class="btn-primary">用浏览器打开</button>
+          <button id="hot-close-btn" class="btn-secondary">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加自定义信源弹窗 -->
+  <div id="add-source-modal" class="modal hidden">
+    <div class="modal-backdrop" id="add-source-backdrop"></div>
+    <div class="modal-card add-source-card" role="dialog" aria-modal="true">
+      <button class="modal-close" id="add-source-close" title="关闭">✕</button>
+      <h2>添加自定义信源</h2>
+      <p class="set-hint">填写 RSS / Atom 订阅地址即可加入抓取与筛选；信源保存在 <code>data/user_sources.json</code>，重启生效并持久保留。</p>
+      <div class="form-row">
+        <label>名称 *<input type="text" id="as-name" placeholder="如 路透社中文" /></label>
+      </div>
+      <div class="form-row as-2col">
+        <label>地区 *
+          <select id="as-region">
+            <option value="cn">国内</option>
+            <option value="us">美国</option>
+            <option value="uk">英国</option>
+            <option value="eu">欧盟</option>
+            <option value="jp">日本</option>
+            <option value="intl">国际机构</option>
+          </select>
+        </label>
+        <label>等级 *
+          <select id="as-grade">
+            <option value="P0">P0 一手</option>
+            <option value="P1">P1 可靠</option>
+            <option value="P2">P2 参考</option>
+          </select>
+        </label>
+      </div>
+      <div class="form-row as-2col">
+        <label>语言<input type="text" id="as-lang" placeholder="如 中文 / 英文" /></label>
+        <label>国家 / 地区<input type="text" id="as-country" placeholder="如 中国" /></label>
+      </div>
+      <div class="form-row">
+        <label>RSS / Atom 地址 *<input type="text" id="as-url" placeholder="https://example.com/feed.xml" /></label>
+      </div>
+      <div class="form-row">
+        <label>简介（可选）<textarea id="as-background" rows="2" placeholder="该信源的背景介绍"></textarea></label>
+      </div>
+      <div class="form-row">
+        <span class="filter-label">分类 *</span>
+        <div id="as-categories" class="chip-group">
+          <label><input type="checkbox" value="politics" /> 时政·国际</label>
+          <label><input type="checkbox" value="finance" /> 财经·经济</label>
+          <label><input type="checkbox" value="tech" /> 科技·数码</label>
+          <label><input type="checkbox" value="society" /> 社会·民生·健康</label>
+          <label><input type="checkbox" value="sports" /> 体育</label>
+          <label><input type="checkbox" value="culture" /> 文化·娱乐</label>
+          <label><input type="checkbox" value="education" /> 教育</label>
+          <label><input type="checkbox" value="defense" /> 军事·防务</label>
+          <label><input type="checkbox" value="environment" /> 环境·气候</label>
+          <label><input type="checkbox" value="science" /> 科学</label>
+          <label><input type="checkbox" value="travel" /> 旅游</label>
+          <label><input type="checkbox" value="auto" /> 汽车</label>
+          <label><input type="checkbox" value="gaming" /> 游戏·电竞</label>
+          <label><input type="checkbox" value="realestate" /> 房产</label>
+        </div>
+      </div>
+      <p id="as-error" class="verify-result"></p>
+      <div class="modal-actions">
+        <button id="as-save" class="btn-primary">保存信源</button>
+        <button id="as-cancel" class="btn-secondary">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 信源管理（发布者页）弹窗 -->
+  <div id="source-manage-modal" class="modal hidden">
+    <div class="modal-backdrop" id="source-manage-backdrop"></div>
+    <div class="modal-card source-manage-card" role="dialog" aria-modal="true">
+      <button class="modal-close" id="source-manage-close" title="关闭">✕</button>
+      <h2>管理信源</h2>
+      <p class="set-hint">勾选行可批量启用 / 禁用 / 删除。内置信源只能禁用，不可删除；用户添加的发布者可删除。</p>
+      <div class="src-manage-bar">
+        <label class="sm-select-all"><input type="checkbox" id="sm-select-all" /> 全选</label>
+        <button id="sm-enable" class="btn-ghost">批量启用</button>
+        <button id="sm-disable" class="btn-ghost">批量禁用</button>
+        <button id="sm-delete" class="btn-danger">删除选中（仅用户源）</button>
+        <span id="sm-count" class="sm-count">已选 0</span>
+      </div>
+      <div id="source-manage-list" class="source-manage-list"></div>
+      <div id="sm-confirm" class="sm-confirm hidden">
+        <span id="sm-confirm-text"></span>
+        <button id="sm-confirm-cancel" class="btn-ghost">取消</button>
+        <button id="sm-confirm-ok" class="btn-danger">确认删除</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/sources.js"></script>
+  <script src="assets/feedparser.js"></script>
+  <script src="assets/datalayer.js"></script>
+  <script src="assets/store.js"></script>
+  <script src="assets/app.js"></script>
+  <script src="assets/chart.umd.min.js"></script>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
