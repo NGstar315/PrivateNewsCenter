@@ -22,3 +22,9 @@ data/
 # 分析/概览草稿（非源码）
 overview-*.md
 worldmonitor-analysis.md
+
+# 构建/测试残留（一次性产物，不入库）
+.build_log.txt
+.nsi_test.nsi
+.nsis_log.txt
+.test_installer.exe
