@@ -4,11 +4,11 @@
   "releaseNotes": "修复安装包完整性、波浪动画层级、发布者下拉层级；新增增量热更新（asar 热交换 + %LOCALAPPDATA% 覆盖层兜底）。",
   "electronVersion": "31.3",
   "asar": {
-    "url": "https://github.com/你的用户名/PrivateNewsCenter/releases/download/v1.1.7/app.asar",
+    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.7/app.asar",
     "mirror": "https://gitee.com/你的用户名/PrivateNewsCenter/releases/download/v1.1.7/app.asar"
   },
   "installer": {
-    "url": "https://github.com/你的用户名/PrivateNewsCenter/releases/download/v1.1.7/实时新闻中心-Setup-1.1.7.exe",
+    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.7/实时新闻中心-Setup-1.1.7.exe",
     "mirror": "https://gitee.com/你的用户名/PrivateNewsCenter/releases/download/v1.1.7/实时新闻中心-Setup-1.1.7.exe"
   },
   "mandatory": false
