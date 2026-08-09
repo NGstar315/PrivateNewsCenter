@@ -126,8 +126,8 @@ function readVersionUrls() {
 
   if (urls.length === 0) {
     urls = [
-      'https://raw.githubusercontent.com/NGstar315/PrivateNewsCenter/main/version.json',
-      'https://gitee.com/你的用户名/PrivateNewsCenter/raw/main/version.json'
+      'https://raw.githubusercontent.com/NGstar315/PrivateNewsCenter/master/version.json',
+      'https://gitee.com/你的用户名/PrivateNewsCenter/raw/master/version.json'
     ];
   }
   return urls;
