@@ -8,8 +8,8 @@
     "mirror": "https://gitee.com/你的用户名/PrivateNewsCenter/releases/download/v1.1.7/app.asar"
   },
   "installer": {
-    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.7/Setup-1.1.7.exe",
-    "mirror": "https://gitee.com/你的用户名/PrivateNewsCenter/releases/download/v1.1.7/Setup-1.1.7.exe"
+    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.7/PrivateNewsCenter-Setup-1.1.7.exe",
+    "mirror": "https://gitee.com/你的用户名/PrivateNewsCenter/releases/download/v1.1.7/PrivateNewsCenter-Setup-1.1.7.exe"
   },
   "mandatory": false
 }

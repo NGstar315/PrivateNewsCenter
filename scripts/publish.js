@@ -44,7 +44,7 @@ function bumpVersion(newVersion) {
   if (fs.existsSync(path.join(root, versionPath))) {
     try { v = JSON.parse(read(versionPath)); } catch (_) {}
   }
-  const ghBase = `https://github.com/你的用户名/PrivateNewsCenter/releases/download/v${newVersion}`;
+  const ghBase = `https://github.com/NGstar315/PrivateNewsCenter/releases/download/v${newVersion}`;
   const gtBase = `https://gitee.com/你的用户名/PrivateNewsCenter/releases/download/v${newVersion}`;
   v.version = newVersion;
   v.asar = {
@@ -52,8 +52,8 @@ function bumpVersion(newVersion) {
     mirror: `${gtBase}/app.asar`
   };
   v.installer = {
-    url: `${ghBase}/实时新闻中心-Setup-${newVersion}.exe`,
-    mirror: `${gtBase}/实时新闻中心-Setup-${newVersion}.exe`
+    url: `${ghBase}/PrivateNewsCenter-Setup-${newVersion}.exe`,
+    mirror: `${gtBase}/PrivateNewsCenter-Setup-${newVersion}.exe`
   };
   // electronVersion 取 package.json 的 electron 主.次号（补丁号变化不触发完整重装）
   const elec = (pkg.devDependencies && pkg.devDependencies.electron) || (pkg.dependencies && pkg.dependencies.electron) || '';
@@ -63,7 +63,7 @@ function bumpVersion(newVersion) {
 
   console.log(`版本已更新为 v${newVersion}`);
   console.log('下一步：');
-  console.log('  1. 打包并生成 dist/NewsCenter/resources/app.asar（增量包）与 dist-installer/实时新闻中心-Setup-' + newVersion + '.exe');
+  console.log('  1. 打包并生成 dist/NewsCenter/resources/app.asar（增量包）与 dist-installer/PrivateNewsCenter-Setup-' + newVersion + '.exe');
   console.log('  2. 把 app.asar、安装包、便携版上传到 GitHub / Gitee Release。');
   console.log('  3. 把 version.json 提交到仓库根目录或上传到你的更新服务器。');
 }
