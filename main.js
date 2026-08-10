@@ -274,6 +274,36 @@ app.whenReady().then(() => {
   // 按 URL 缓存上次响应体，用于条件请求（304）时回放，避免重复下载
   const feedCache = new Map();
 
+  // 编码归一化：把常见中文编码别名映射到 TextDecoder 支持的名称
+  function normalizeEncoding(enc) {
+    if (!enc) return 'utf-8';
+    const e = enc.toLowerCase().trim();
+    if (e === 'utf8') return 'utf-8';
+    if (e === 'gb2312' || e === 'gb18030') return 'gbk';
+    return e;
+  }
+
+  // 根据响应头或 HTML <meta charset> 自动检测编码并解码，避免 GBK 页面被当 UTF-8 读成乱码
+  function decodeBuffer(buf, contentType) {
+    let enc = null;
+    if (contentType) {
+      const m = contentType.match(/charset=([^\s;"]+)/i);
+      if (m) enc = normalizeEncoding(m[1].replace(/["']/g, ''));
+    }
+    if (!enc) {
+      const probe = buf.toString('latin1').slice(0, 4096);
+      const meta = probe.match(/<meta[^>]*charset=["']?([^"'>;\s]+)/i) ||
+                   probe.match(/<meta[^>]*http-equiv=["']?content-type["']?[^>]*content=["']?[^"'>]*charset=([^"'>;\s]+)/i);
+      if (meta) enc = normalizeEncoding(meta[1]);
+    }
+    enc = enc || 'utf-8';
+    try {
+      return new TextDecoder(enc, { fatal: false }).decode(buf);
+    } catch (e) {
+      return buf.toString('utf-8');
+    }
+  }
+
   ipcMain.handle('fetch-url', async (event, url, opts) => {
     opts = opts || {};
     const headers = {
@@ -311,7 +341,8 @@ app.whenReady().then(() => {
         res = await fetch(url, { headers: h2, signal: controller.signal });
       }
       if (!res.ok) throw new Error('HTTP ' + res.status + ' @ ' + url);
-      const body = await res.text();
+      const buf = Buffer.from(await res.arrayBuffer());
+      const body = decodeBuffer(buf, res.headers.get('content-type'));
       const etag = res.headers.get('etag');
       const lastModified = res.headers.get('last-modified');
       feedCache.set(url, { body, etag, lastModified });
@@ -357,7 +388,8 @@ app.whenReady().then(() => {
         signal: controller.signal
       });
       if (!res.ok) throw new Error('HTTP ' + res.status + ' @ ' + url);
-      return await res.text();
+      const buf = Buffer.from(await res.arrayBuffer());
+      return decodeBuffer(buf, res.headers.get('content-type'));
     } finally {
       clearTimeout(timer);
     }

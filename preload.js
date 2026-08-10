@@ -54,6 +54,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.removeAllListeners('update-progress');
     ipcRenderer.on('update-progress', (event, pct) => { try { callback(pct); } catch (_) {} });
   },
+  onUpdateStatusMessage: (callback) => {
+    ipcRenderer.removeAllListeners('update-status-message');
+    ipcRenderer.on('update-status-message', (event, data) => { try { callback(data); } catch (_) {} });
+  },
   currentVersion: () => ipcRenderer.invoke('current-version'),
 
   isElectron: true

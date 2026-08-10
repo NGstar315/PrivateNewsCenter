@@ -28,3 +28,8 @@ worldmonitor-analysis.md
 .nsi_test.nsi
 .nsis_log.txt
 .test_installer.exe
+
+# 发布令牌（本地保存，绝不入库，防止泄露到 GitHub/Gitee）
+.release_tokens.json
+.env
+.env.local

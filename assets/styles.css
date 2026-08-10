@@ -285,7 +285,7 @@ button { font-family: inherit; cursor: pointer; }
 .divider.week .divider-label { color: var(--warn); }
 
 /* ---------- 热搜 ---------- */
-.hot-section { display: flex; flex-direction: column; gap: 14px; }
+.hot-section { display: flex; flex-direction: column; gap: 14px; position: relative; }
 .hot-tabs { display: flex; gap: 6px; }
 .hot-tab {
   flex: 1; border: 1px solid var(--border); background: transparent; color: var(--text-dim);
@@ -294,10 +294,16 @@ button { font-family: inherit; cursor: pointer; }
 }
 .hot-tab:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
 .hot-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: 0 4px 14px rgba(10, 132, 255, 0.35); }
+.hot-list-wrap { position: relative; }
 .hot-list {
   background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: var(--radius-lg); padding: 6px; max-height: 420px; overflow-y: auto;
+  border-radius: var(--radius-lg); padding: 6px;
+  min-height: 420px; max-height: 420px; overflow-y: auto;
   backdrop-filter: blur(20px);
+}
+.hot-list .placeholder:only-child {
+  min-height: calc(420px - 12px);
+  display: flex; align-items: center; justify-content: center;
 }
 /* 移除 <ol> 默认 40px 左缩进，否则榜单整体右移 */
 .hot-list ol { list-style: none; margin: 0; padding: 0; }
@@ -557,6 +563,50 @@ button { font-family: inherit; cursor: pointer; }
 .ios-toggle input:checked + .toggle-track { background: var(--accent); }
 .ios-toggle input:checked + .toggle-track::after { transform: translateX(18px); }
 .ios-toggle input:focus-visible + .toggle-track { box-shadow: 0 0 0 2px var(--accent-soft); }
+
+/* 更新线路：首选 / 备用 分段滑动开关 */
+.line-toggle {
+  position: relative; display: inline-flex; align-items: center;
+  width: 140px; height: 34px; border-radius: 999px;
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  cursor: pointer; user-select: none; overflow: hidden; flex-shrink: 0;
+  padding: 3px; box-sizing: border-box;
+}
+.line-toggle:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--accent-soft); }
+.line-toggle .line-opt {
+  flex: 1; text-align: center; z-index: 2; position: relative;
+  font-size: 12.5px; font-weight: 600; line-height: 1; transition: color 0.25s;
+}
+.line-toggle .line-opt-left { color: #fff; }
+.line-toggle .line-opt-right { color: var(--text-dim); }
+.line-toggle.is-secondary .line-opt-left { color: var(--text-dim); }
+.line-toggle.is-secondary .line-opt-right { color: #fff; }
+.line-toggle .line-knob {
+  position: absolute; top: 3px; left: 3px;
+  width: calc(50% - 3px); height: calc(100% - 6px);
+  background: var(--accent); border-radius: 999px; z-index: 1;
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.line-toggle.is-secondary .line-knob { transform: translateX(100%); }
+.update-actions { margin-top: 6px; }
+.update-status { font-size: 12.5px; color: var(--text-dim); }
+
+/* 更新卡片拉宽后的舒展布局 */
+.update-card .update-line-row { justify-content: flex-start; gap: 24px; }
+.update-card .line-toggle { width: 180px; height: 36px; }
+.update-card .update-actions { gap: 16px; }
+
+/* 按钮 loading / 反馈状态 */
+.btn-ghost.loading, .btn-primary.loading {
+  opacity: .7; cursor: wait; position: relative; padding-left: 30px;
+}
+.btn-ghost.loading::before, .btn-primary.loading::before {
+  content: ''; position: absolute; left: 10px; top: 50%; margin-top: -6px;
+  width: 10px; height: 10px; border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: #fff; border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* 热搜榜单设置网格 */
 .settings-hot-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
@@ -846,3 +896,89 @@ button { font-family: inherit; cursor: pointer; }
   .viz-layout { grid-template-columns: 1fr; }
   .top-nav { order: 3; width: 100%; justify-content: flex-start; }
 }
+
+/* ---------- 热搜圆环进度（独立刷新管道） ---------- */
+.hot-ring {
+  position: absolute; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(13, 13, 15, 0.78);
+  backdrop-filter: blur(10px) saturate(160%);
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: opacity 0.35s ease, visibility 0.35s ease;
+}
+.hot-ring.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+.hot-ring .ring-inner { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.hot-ring .ring-track { position: relative; width: 80px; height: 80px; }
+.hot-ring .ring-svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.hot-ring .ring-bg { fill: none; stroke: rgba(255, 255, 255, 0.12); stroke-width: 8; }
+.hot-ring .ring-fg {
+  fill: none; stroke: var(--accent); stroke-width: 8; stroke-linecap: round;
+  stroke-dasharray: 326.726; stroke-dashoffset: 326.726;
+  transition: stroke-dashoffset 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  filter: drop-shadow(0 0 5px rgba(10, 132, 255, 0.5));
+}
+.hot-ring .ring-pct { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; }
+.hot-ring .ring-label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+
+/* ---------- 日期快捷范围 ---------- */
+.range-quick { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 2px; }
+.chip.sm { padding: 3px 10px; font-size: 12px; border-radius: 999px; }
+.btn-ghost.sm { padding: 3px 12px; font-size: 12px; border-radius: 999px; }
+
+/* ---------- 设置小字说明 ---------- */
+.set-sub { display: block; font-size: 11px; color: var(--text-dim); margin-top: 3px; line-height: 1.4; font-weight: 400; }
+
+/* ---------- 更新状态提示弹窗（替代原生 dialog） ---------- */
+.update-status-card {
+  width: 380px; max-width: 90vw; max-height: 80vh;
+  padding: 28px 26px 24px; text-align: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  animation: popIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.update-status-icon {
+  width: 56px; height: 56px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; margin-bottom: 4px;
+}
+.update-status-icon.info { background: linear-gradient(135deg, #0a84ff, #0066d4); box-shadow: 0 8px 22px rgba(10, 132, 255, 0.35); }
+.update-status-icon.warning { background: linear-gradient(135deg, #ff9f0a, #d47800); box-shadow: 0 8px 22px rgba(255, 159, 10, 0.35); }
+.update-status-icon svg { width: 28px; height: 28px; }
+.update-status-card h3 { font-size: 18px; font-weight: 700; margin: 0; color: var(--text); }
+.update-status-card p { margin: 0; font-size: 13.5px; color: var(--text); line-height: 1.5; }
+.update-status-detail { font-size: 12px; color: var(--text-dim); line-height: 1.45; }
+.update-status-card .btn-primary { margin-top: 8px; min-width: 120px; justify-content: center; }
+
+/* ---------- 设置页检查更新状态标签与进度条 ---------- */
+.update-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.update-status {
+  font-size: 12.5px; color: var(--text-dim); min-height: 18px;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.update-status::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim);
+}
+.update-status.checking::before { background: var(--accent); animation: pulseDot 1.2s infinite; }
+.update-status.switching::before { background: var(--warn); animation: pulseDot 1.2s infinite; }
+.update-status.connected::before { background: var(--accent); animation: pulseDot 1.2s infinite; }
+.update-status.fail::before { background: var(--danger); }
+.update-status.success::before { background: var(--P0); }
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+.update-bar-wrap { display: inline-flex; align-items: center; gap: 8px; }
+.update-bar-track {
+  width: 150px; height: 8px; background: rgba(255, 255, 255, 0.10);
+  border-radius: 999px; overflow: hidden;
+}
+.update-bar-fill {
+  height: 100%; width: 0%; background: var(--accent); border-radius: 999px;
+  transition: width 0.25s ease, background 0.3s ease;
+}
+.update-bar-fill.done { background: var(--P0); }
+.update-bar-pct { font-size: 11.5px; color: var(--text-dim); min-width: 34px; text-align: right; }

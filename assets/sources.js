@@ -1479,8 +1479,10 @@ function parseHtmlTable(doc, config) {
 const HOT_SOURCES = [
   {
     id: 'weibo', name: '微博热搜', grade: 'P2', region: 'cn',
-    url: 'https://api-hot.imsyy.top/weibo',
+    // uapis.cn 聚合热榜（实测稳定，无需鉴权）
+    url: 'https://uapis.cn/api/v1/misc/hotboard?type=weibo',
     fallbacks: [
+      'https://api-hot.imsyy.top/weibo',
       'https://api.codelife.cc/api/top/list?type=weibo',
       proxy('https://api-hot.imsyy.top/weibo'),
       'https://api.pearktrue.cn/api/hotlist/wb',
@@ -1492,8 +1494,8 @@ const HOT_SOURCES = [
     ],
     parse: (data) => {
       const list = extractHotArray(data).map(it => {
-        const title = it.word || it.title || it.query || it.name || '';
-        const hot = it.raw_hot || it.num || it.hot || it.hotScore || null;
+        const title = it.title || it.word || it.name || it.query || '';
+        const hot = it.hot_value || it.raw_hot || it.num || it.hot || it.hotScore || null;
         let url = it.url || it.link || it.mobileUrl || it.mobilUrl || it.href || it.wwwUrl || '';
         if (!url && title) url = 'https://s.weibo.com/weibo?q=' + encodeURIComponent('#' + title);
         return { title, url, hot };
@@ -1547,8 +1549,10 @@ const HOT_SOURCES = [
   },
   {
     id: 'zhihu', name: '知乎热榜', grade: 'P2', region: 'cn',
-    url: 'https://api-hot.imsyy.top/zhihu',
+    // uapis.cn 聚合热榜（实测稳定，无需鉴权）
+    url: 'https://uapis.cn/api/v1/misc/hotboard?type=zhihu',
     fallbacks: [
+      'https://api-hot.imsyy.top/zhihu',
       'https://api.codelife.cc/api/top/list?type=zhihu',
       proxy('https://api-hot.imsyy.top/zhihu'),
       'https://api.pearktrue.cn/api/hotlist/zhihu',
@@ -1562,7 +1566,7 @@ const HOT_SOURCES = [
       const list = extractHotArray(data).map(it => {
         let title = it.title || it.name || '';
         let url = it.url || it.link || it.href || it.wwwUrl || '';
-        let hot = it.hot || it.detail_text || it.excerpt || it.score || it.hotScore || null;
+        let hot = it.hot_value || it.hot || it.detail_text || it.excerpt || it.score || it.hotScore || null;
         const t = it.target;
         if (t) {
           title = t.title || title;

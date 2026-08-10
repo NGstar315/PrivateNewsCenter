@@ -1,0 +1,57 @@
+/*
+ * scripts/release.js —— 一键发版统一编排（构建 + 双源上传 + GitHub 推代码）
+ * ===================================================================
+ * 用法：node scripts/release.js <版本号> [Gitee用户名]
+ *   例：node scripts/release.js 1.1.8
+ *       node scripts/release.js 1.1.8 NGstar
+ *
+ * 流程：
+ *   1. node scripts/build_release.js <版本> [Gitee用户]  —— 提版本 + 重打 asar + 安装版/便携版 exe + 汇总到 release/
+ *   2. 若 .release_tokens.json 配置了 github  → 上传到 GitHub（含推送源码）
+ *   3. 若 .release_tokens.json 配置了 gitee   → 上传到 Gitee
+ *
+ * 令牌来自 .release_tokens.json（本地 gitignore，不入库）。缺失某一源则自动跳过该源。
+ */
+
+const { spawnSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+const root = path.resolve(__dirname, '..');
+const version = process.argv[2];
+if (!version) {
+  console.error('❌ 请提供版本号：node scripts/release.js <版本号> [Gitee用户名]');
+  process.exit(1);
+}
+const giteeUser = process.argv[3] || 'NGstar';
+
+// 读取令牌配置
+let tokens = {};
+try { tokens = JSON.parse(fs.readFileSync(path.join(root, '.release_tokens.json'), 'utf-8')); } catch (_) {}
+
+const env = { ...process.env };
+if (tokens.gitee) env.GITEE_TOKEN = tokens.gitee;
+if (tokens.github) env.GITHUB_TOKEN = tokens.github;
+
+// 1. 构建
+console.log('▶ [1/3] 构建发版产物 v' + version + ' ...');
+const build = spawnSync('node', ['scripts/build_release.js', version, giteeUser], { cwd: root, stdio: 'inherit', env });
+if (build.status !== 0) { console.error('❌ 构建失败，中止发版'); process.exit(1); }
+
+// 2. GitHub
+if (tokens.github) {
+  console.log('\n▶ [2/3] 上传到 GitHub ...');
+  spawnSync('node', ['scripts/upload_github.js'], { cwd: root, stdio: 'inherit', env });
+} else {
+  console.log('\n⏭️ [2/3] 未配置 GitHub 令牌，跳过（在 .release_tokens.json 填 "github" 后启用）');
+}
+
+// 3. Gitee
+if (tokens.gitee) {
+  console.log('\n▶ [3/3] 上传到 Gitee ...');
+  spawnSync('node', ['scripts/upload_gitee.js'], { cwd: root, stdio: 'inherit', env });
+} else {
+  console.log('\n⏭️ [3/3] 未配置 Gitee 令牌，跳过（在 .release_tokens.json 填 "gitee" 后启用）');
+}
+
+console.log('\n✅ release.js 执行完毕');

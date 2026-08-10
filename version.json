@@ -1,15 +1,15 @@
 {
   "version": "1.1.7",
   "minVersion": "1.0.0",
-  "releaseNotes": "修复安装包完整性、波浪动画层级、发布者下拉层级；新增增量热更新（asar 热交换 + %LOCALAPPDATA% 覆盖层兜底）。",
+  "releaseNotes": "新闻按发布日期智能排序（优先近 7 天，可在设置切换近 1 个月视图）；热搜榜单改为独立并发刷新并新增环形加载进度；支持按指定日期/时间段检索；「检查更新」升级为自定义弹窗，新增状态标签与下载进度条（完成后变绿）并自动安装；增量热更新（asar 热交换 + 覆盖层兜底）稳定性增强。",
   "electronVersion": "31.3",
   "asar": {
     "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.7/app.asar",
-    "mirror": "https://gitee.com/你的用户名/PrivateNewsCenter/releases/download/v1.1.7/app.asar"
+    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.7/app.asar"
   },
   "installer": {
     "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.7/PrivateNewsCenter-Setup-1.1.7.exe",
-    "mirror": "https://gitee.com/你的用户名/PrivateNewsCenter/releases/download/v1.1.7/PrivateNewsCenter-Setup-1.1.7.exe"
+    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.7/PrivateNewsCenter-Setup-1.1.7.exe"
   },
   "mandatory": false
 }

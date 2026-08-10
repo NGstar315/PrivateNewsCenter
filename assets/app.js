@@ -467,6 +467,57 @@
   }
   function closeHotModal() { el('hot-modal').classList.add('hidden'); }
 
+  // ---------- 更新状态提示弹窗（替代原生 dialog） ----------
+  function showUpdateStatusModal(data) {
+    data = data || {};
+    const modal = el('update-status-modal');
+    const iconWrap = el('update-status-icon');
+    const isWarning = data.type === 'warning';
+    iconWrap.className = 'update-status-icon' + (isWarning ? ' warning' : ' info');
+    iconWrap.innerHTML = isWarning
+      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>';
+    el('update-status-title').textContent = data.title || '提示';
+    el('update-status-message').textContent = data.message || '';
+    const detail = el('update-status-detail');
+    if (data.detail) { detail.textContent = data.detail; detail.classList.remove('hidden'); }
+    else { detail.classList.add('hidden'); }
+    modal.classList.remove('hidden');
+  }
+  function hideUpdateStatusModal() { el('update-status-modal').classList.add('hidden'); }
+
+  // ---------- 设置页检查更新状态标签与进度条 ----------
+  function setUpdateStatus(text, mood) {
+    const s = el('update-status');
+    if (!s) return;
+    s.textContent = text || '';
+    s.className = 'update-status' + (mood ? ' ' + mood : '');
+  }
+  function showUpdateBar() {
+    const wrap = el('update-bar-wrap');
+    if (wrap) wrap.classList.remove('hidden');
+  }
+  function hideUpdateBar() {
+    const wrap = el('update-bar-wrap');
+    const fill = el('update-bar-fill');
+    const pct = el('update-bar-pct');
+    if (wrap) wrap.classList.add('hidden');
+    if (fill) { fill.style.width = '0%'; fill.classList.remove('done'); }
+    if (pct) pct.textContent = '0%';
+  }
+  function setUpdateBar(pct) {
+    const fill = el('update-bar-fill');
+    const pctEl = el('update-bar-pct');
+    if (fill) fill.style.width = pct + '%';
+    if (pctEl) pctEl.textContent = pct + '%';
+  }
+  function markUpdateBarDone() {
+    const fill = el('update-bar-fill');
+    const pctEl = el('update-bar-pct');
+    if (fill) { fill.style.width = '100%'; fill.classList.add('done'); }
+    if (pctEl) pctEl.textContent = '100%';
+  }
+
   function formatHeat(n) {
     if (n == null) return '';
     if (n >= 100000000) return (n / 100000000).toFixed(1) + '亿';
@@ -675,16 +726,23 @@
   async function refreshCacheStats() {
     const api = window.electronAPI && window.electronAPI.storage;
     if (!api || !api.dirInfo) return;
+    const btn = el('refresh-stats');
+    const origText = btn ? btn.textContent : '刷新统计';
     try {
+      if (btn) { btn.classList.add('loading'); btn.textContent = '刷新中…'; btn.disabled = true; }
       const img = await api.dirInfo('images');
       const cache = await api.dirInfo('cache');
       el('stat-image-size').textContent = formatBytes(img && img.bytes);
       el('stat-news-size').textContent = formatBytes(cache && cache.bytes);
       el('stat-image-files').textContent = (img && img.files != null ? img.files : '—') + ' 个文件';
+      showToast('缓存统计已刷新');
     } catch (e) {
       el('stat-image-size').textContent = '—';
       el('stat-news-size').textContent = '—';
       el('stat-image-files').textContent = '—';
+      showToast('刷新统计失败');
+    } finally {
+      if (btn) { btn.classList.remove('loading'); btn.textContent = origText; btn.disabled = false; }
     }
   }
 
@@ -912,6 +970,25 @@
     renderCalendar(); renderNews();
   }
 
+  // 日期快捷范围：获取某一天 / 某一个时段的新闻
+  function applyRangeChip(n) {
+    const now = new Date();
+    const today = dateStr(now.getTime());
+    let from;
+    if (n === 'today') from = today;
+    else { const d = new Date(now.getTime() - (parseInt(n, 10) - 1) * 86400000); from = dateStr(d.getTime()); }
+    el('date-from').value = from;
+    el('date-to').value = today;
+    state.filters.dateFrom = from;
+    state.filters.dateTo = today;
+    state.calendarDate = null; // 用范围筛选时清除单日日历筛选，避免冲突
+    renderCalendar(); resetAndRenderNews();
+  }
+  function refreshCurrentRange() {
+    // 触发一次新闻刷新，确保当前筛选时段内的新闻被抓取并展示
+    refresh('news');
+  }
+
   // ---------- 发布者筛选 chips ----------
   function renderSourceFilterChips() {
     const box = el('source-filter-chips');
@@ -931,59 +1008,110 @@
     }
   }
 
-  // ---------- 刷新（可拆分：news / hot / all） ----------
+  // ---------- 热搜圆环进度（独立刷新管道的可视化） ----------
+  const RING_CIRC = 2 * Math.PI * 52; // r=52 的圆周长
+  function showHotRing() {
+    const ring = el('hot-progress-ring');
+    if (!ring) return;
+    ring.classList.remove('hidden');
+    updateHotRing(0, '准备中…');
+  }
+  function updateHotRing(pct, label) {
+    const ring = el('hot-progress-ring');
+    if (!ring) return;
+    pct = Math.max(0, Math.min(100, pct || 0));
+    const fg = ring.querySelector('.ring-fg');
+    if (fg) fg.style.strokeDashoffset = String(RING_CIRC * (1 - pct / 100));
+    const pctEl = el('hot-ring-pct');
+    if (pctEl) pctEl.textContent = pct + '%';
+    const lbl = ring.querySelector('.ring-label');
+    if (lbl && label) lbl.textContent = label;
+  }
+  function hideHotRing() {
+    const ring = el('hot-progress-ring');
+    if (!ring) return;
+    updateHotRing(100);
+    setTimeout(() => ring.classList.add('hidden'), 500);
+  }
+
+  function buildEnabledHotIds() {
+    const ids = new Set();
+    for (const s of SOURCES.HOT_SOURCES) {
+      const tab = HOT_TABS.find(t => t.ids.includes(s.id));
+      if (!tab || (settings.hot && settings.hot[tab.key] !== false)) ids.add(s.id);
+    }
+    return ids;
+  }
+
+  // 新闻刷新：保持原有机制，按发布日期分窗口落盘 + 更新 7 天饱和状态
+  async function runNews(enabled, bar, pText) {
+    const result = await DataLayer.refreshAll(
+      (done, total, label) => {
+        const pct = total ? Math.round((done / total) * 100) : 0;
+        bar.style.width = pct + '%'; pText.textContent = label + '  (' + done + '/' + total + ')';
+      },
+      (src, items) => {
+        if (!items || !items.length) return;
+        for (const it of items) pendingNewKeys.add(Store.dedupeKey(it));
+        state.news = state.news.concat(items);
+        const seen = new Set();
+        state.news = state.news.filter(it => {
+          const k = Store.dedupeKey(it);
+          if (seen.has(k)) return false;
+          seen.add(k); return true;
+        });
+        state.news.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        scheduleRender();
+      },
+      enabled, null, 'news'
+    );
+    const res = await Store.mergeAndPersist(result.news);
+    await Store.recordWindowSaturation(res.added7); // 更新近 7 天饱和状态（决定是否自动扩展到 30 天）
+    state.news = res.merged;
+    renderNews({ animate: true }); renderCalendar(); renderVizIfVisible();
+  }
+
+  // 热搜刷新：独立管道，进度走圆环，互不阻塞新闻
+  async function runHot(enabledHotIds) {
+    const result = await DataLayer.refreshAll(
+      (done, total, label) => {
+        const pct = total ? Math.round((done / total) * 100) : 0;
+        updateHotRing(pct, '榜单 ' + label);
+      },
+      null, null, enabledHotIds, 'hot'
+    );
+    state.hot = result.hot;
+    renderHot();
+  }
+
+  // 并发刷新：新闻与热搜同时获取（热搜独立管道 + 圆环进度，互不等待）
   async function refresh(mode) {
     mode = mode || 'all';
     const btns = ['refresh-news-btn', 'refresh-hot-btn', 'refresh-all-btn'].map(el);
     const pWrap = el('progress-wrap'), bar = el('progress-bar'), pText = el('progress-text');
     if (btns.some(b => b && b.disabled)) return;
     btns.forEach(b => { if (b) b.disabled = true; });
-    pWrap.classList.remove('hidden'); bar.style.width = '0%';
-    pText.textContent = '正在后台获取' + (mode === 'news' ? '新闻' : mode === 'hot' ? '热搜榜单' : '新闻与热搜') + '…';
+    const showNews = mode !== 'hot';
+    const showHot = mode !== 'news';
+    if (showNews) {
+      pWrap.classList.remove('hidden'); bar.style.width = '0%';
+      pText.textContent = '正在获取新闻…';
+    }
+    if (showHot) showHotRing();
     try {
       const enabled = enabledSourceIds();
-      const enabledHotIds = new Set();
-      for (const s of SOURCES.HOT_SOURCES) {
-        const tab = HOT_TABS.find(t => t.ids.includes(s.id));
-        if (!tab || (settings.hot && settings.hot[tab.key] !== false)) enabledHotIds.add(s.id);
-      }
-      pendingNewKeys.clear();   // 新一轮刷新，清空上一轮残留的新增标记
-      const result = await DataLayer.refreshAll(
-        (done, total, label) => {
-          const pct = total ? Math.round((done / total) * 100) : 0;
-          bar.style.width = pct + '%'; pText.textContent = label + '  (' + done + '/' + total + ')';
-        },
-        (src, items) => {
-          // 每完成一个新闻源即时追加并渲染，减少等待时间
-          if (!items || !items.length) return;
-          // 记录本次新增项，供渲染时打"入场动画"（按时间已自然排到对应日期队首）
-          for (const it of items) pendingNewKeys.add(Store.dedupeKey(it));
-          state.news = state.news.concat(items);
-          const seen = new Set();
-          state.news = state.news.filter(it => {
-            const k = Store.dedupeKey(it);
-            if (seen.has(k)) return false;
-            seen.add(k); return true;
-          });
-          state.news.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-          scheduleRender();
-        },
-        enabled, enabledHotIds, mode
-      );
-      if (mode !== 'hot') {
-        const merged = await Store.mergeAndPersist(result.news);
-        state.news = merged;
-        renderNews({ animate: true }); renderCalendar(); renderVizIfVisible();
-      }
-      if (mode !== 'news') {
-        state.hot = result.hot;
-        renderHot();
-      }
+      pendingNewKeys.clear();
+      const tasks = [];
+      if (showNews) tasks.push(runNews(enabled, bar, pText));
+      if (showHot) tasks.push(runHot(buildEnabledHotIds()));
+      // 同时跑新闻与热搜，互不等待 → 不再因等榜单而卡住新闻
+      await Promise.allSettled(tasks);
       el('last-updated').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
     } catch (e) {
-      pText.textContent = '刷新出错：' + (e && e.message || e);
+      if (pText) pText.textContent = '刷新出错：' + (e && e.message || e);
     } finally {
-      setTimeout(() => pWrap.classList.add('hidden'), 600);
+      if (showNews) setTimeout(() => pWrap.classList.add('hidden'), 600);
+      if (showHot) hideHotRing();
       btns.forEach(b => { if (b) b.disabled = false; });
     }
   }
@@ -1068,6 +1196,7 @@
     el('set-smart-clean').checked = settings.smartClean !== false;
     el('set-background-refresh').checked = settings.backgroundRefresh !== false;
     el('set-fetch-mode').value = settings.fetchMode || 'balanced';
+    el('set-fetch-month').checked = !!settings.fetchMonth;
     el('set-hot-maxitems').value = settings.hot && settings.hot.maxItems != null ? settings.hot.maxItems : 30;
     el('settings-hot').querySelectorAll('input[type="checkbox"]').forEach(cb => {
       const key = cb.dataset.hot;
@@ -1077,8 +1206,8 @@
     el('set-geo-key').value = settings.geo.apiKey || '';
     el('set-geo-style').value = settings.geo.mapStyleId || '';
     el('set-datadir').value = settings.dataDir || '';
-    el('set-update-url').value = settings.updateUrl || '';
-    el('set-update-mirrors').value = (settings.updateMirrors || []).join(', ');
+    const lt = el('update-line-toggle');
+    if (lt) lt.classList.toggle('is-secondary', settings.updateLine === 'gitee');
     if (window.electronAPI && window.electronAPI.appPaths) {
       window.electronAPI.appPaths().then(p => { el('set-current-datadir').textContent = p.dataDir; });
     }
@@ -1230,6 +1359,7 @@
     settings.smartClean = el('set-smart-clean').checked;
     settings.backgroundRefresh = el('set-background-refresh').checked;
     settings.fetchMode = el('set-fetch-mode').value;
+    settings.fetchMonth = el('set-fetch-month').checked;
     settings.hot = settings.hot || {};
     settings.hot.maxItems = parseInt(el('set-hot-maxitems').value) || 30;
     el('settings-hot').querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -1239,9 +1369,7 @@
     settings.geo.apiKey = el('set-geo-key').value.trim();
     settings.geo.mapStyleId = el('set-geo-style').value.trim();
     settings.dataDir = el('set-datadir').value.trim();
-    settings.updateUrl = el('set-update-url').value.trim();
-    const mirrorsRaw = el('set-update-mirrors').value.trim();
-    settings.updateMirrors = mirrorsRaw ? mirrorsRaw.split(/[,，]/).map(s => s.trim()).filter(Boolean) : [];
+    settings.updateLine = (el('update-line-toggle') && el('update-line-toggle').classList.contains('is-secondary')) ? 'gitee' : 'github';
     settings.sources = {};
     el('settings-sources').querySelectorAll('input[type="checkbox"]').forEach(cb => {
       settings.sources[cb.dataset.id] = cb.checked;
@@ -1263,6 +1391,7 @@
   async function persistSettings(note) {
     collectSettings();
     await Store.saveSettings(settings);
+    Store.setSettings(settings); // 同步窗口配置给数据层
     if (window.electronAPI && window.electronAPI.setBackgroundRefresh) {
       window.electronAPI.setBackgroundRefresh(settings.backgroundRefresh !== false);
     }
@@ -1287,6 +1416,14 @@
       el('date-from').value = ''; el('date-to').value = ''; state.filters.dateFrom = ''; state.filters.dateTo = ''; state.calendarDate = null;
       renderCalendar(); resetAndRenderNews();
     });
+    // 日期快捷范围（获取某一天 / 某时段）
+    const rangeQuick = el('range-quick');
+    if (rangeQuick) rangeQuick.addEventListener('click', (e) => {
+      const chip = e.target.closest('[data-range]');
+      if (chip) applyRangeChip(chip.dataset.range);
+    });
+    const refreshRangeBtn = el('refresh-range-btn');
+    if (refreshRangeBtn) refreshRangeBtn.addEventListener('click', refreshCurrentRange);
     el('src-all').addEventListener('click', () => {
       state.filters.sources.clear(); setActive('src-all', el('src-all'));
       el('source-filter-chips').querySelectorAll('.chip').forEach(c => c.classList.remove('selected'));
@@ -1329,6 +1466,10 @@
     el('hot-close').addEventListener('click', closeHotModal);
     el('hot-close-btn').addEventListener('click', closeHotModal);
     el('hot-backdrop').addEventListener('click', closeHotModal);
+
+    // 更新状态提示弹窗
+    el('update-status-ok').addEventListener('click', hideUpdateStatusModal);
+    el('update-status-backdrop').addEventListener('click', hideUpdateStatusModal);
 
     // 添加自定义信源
     el('add-source-btn').addEventListener('click', openAddSourceModal);
@@ -1373,22 +1514,35 @@
     bindAutoSave('set-smart-clean', '正文清理已保存');
     bindAutoSave('set-background-refresh', '后台刷新已保存');
     bindAutoSave('set-fetch-mode', '获取模式已保存');
+    bindAutoSave('set-fetch-month', '月窗口已保存');
     bindAutoSave('set-hot-maxitems', '热搜条数已保存');
     bindAutoSave('set-geo-provider', '地图服务商已保存');
     bindAutoSave('set-geo-key', '地图 Key 已保存');
     bindAutoSave('set-geo-style', '地图样式已保存');
     bindAutoSave('set-datadir', '数据目录已保存');
-    bindAutoSave('set-update-url', '更新源已保存');
-    bindAutoSave('set-update-mirrors', '镜像地址已保存');
+    // 更新线路：首选(GitHub) / 备用(Gitee) 分段开关
+    const lineToggle = el('update-line-toggle');
+    if (lineToggle) {
+      const toggleLine = () => {
+        const secondary = !lineToggle.classList.contains('is-secondary');
+        lineToggle.classList.toggle('is-secondary', secondary);
+        lineToggle.setAttribute('aria-checked', String(!secondary));
+        persistSettings(secondary ? '已切换至备用线路（Gitee）' : '已切换至首选线路（GitHub）');
+      };
+      lineToggle.addEventListener('click', toggleLine);
+      lineToggle.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleLine(); }
+      });
+    }
     // 立即检查更新按钮
     const checkUpdateBtn = el('check-update-btn');
     if (checkUpdateBtn) {
       checkUpdateBtn.addEventListener('click', () => {
         if (window.electronAPI && window.electronAPI.checkForUpdates) {
-          checkUpdateBtn.textContent = '检查中…';
           checkUpdateBtn.disabled = true;
+          setUpdateStatus('');
+          hideUpdateBar();
           window.electronAPI.checkForUpdates().finally(() => {
-            checkUpdateBtn.textContent = '检查更新';
             checkUpdateBtn.disabled = false;
           });
         }
@@ -1513,12 +1667,7 @@
     dl.disabled = true;
     dl.textContent = '准备中…';
     if (prog) { prog.classList.remove('hidden'); prog.textContent = '开始下载…'; }
-
-    if (window.electronAPI.onUpdateProgress) {
-      window.electronAPI.onUpdateProgress((pct) => {
-        if (prog) prog.textContent = '下载中 ' + pct + '%';
-      });
-    }
+    // 进度由 init() 中全局 onUpdateProgress 统一处理，此处不再重复注册
 
     let res = null;
     try { res = await window.electronAPI.downloadUpdate(info); }
@@ -1551,6 +1700,7 @@
   // ---------- 启动 ----------
   async function init() {
     settings = await Store.loadSettings();
+    Store.setSettings(settings); // 同步窗口配置给数据层
     // 应用新闻获取模式（并发数 + 条件请求）到数据层
     if (window.DataLayer && DataLayer.MODES) {
       DataLayer.configure(DataLayer.MODES[settings.fetchMode] || DataLayer.MODES.balanced);
@@ -1566,6 +1716,27 @@
     // 监听主进程推送的更新通知
     if (window.electronAPI && window.electronAPI.onUpdateAvailable) {
       window.electronAPI.onUpdateAvailable(info => showUpdateBanner(info));
+    }
+    if (window.electronAPI && window.electronAPI.onUpdateStatusMessage) {
+      window.electronAPI.onUpdateStatusMessage(data => {
+        // 非静默消息才弹窗；过程中的状态只更新设置页标签
+        if (!data.silent) showUpdateStatusModal(data);
+        // 同步更新设置页状态标签
+        if (data.type === 'checking') setUpdateStatus(data.title || '正在检查…', 'checking');
+        else if (data.type === 'checking-source') setUpdateStatus('连接失败，正在替换备用源', 'switching');
+        else if (data.type === 'connected') { setUpdateStatus('连接成功，正在获取更新', 'connected'); showUpdateBar(); }
+        else if (data.type === 'success') { setUpdateStatus('下载完成，正在安装…', 'success'); markUpdateBarDone(); }
+        else if (data.type === 'warning') setUpdateStatus(data.title || '无法连接，请检查网络', 'fail');
+        else if (data.type === 'info') setUpdateStatus(data.title || '已是最新版本', '');
+      });
+    }
+    if (window.electronAPI && window.electronAPI.onUpdateProgress) {
+      window.electronAPI.onUpdateProgress((pct) => {
+        // 统一更新设置页条形进度条与顶部 banner 文本
+        setUpdateBar(pct);
+        const prog = el('update-progress');
+        if (prog) prog.textContent = '下载中 ' + pct + '%';
+      });
     }
     favs.forEach(it => state.favorites.set(favKey(it), it));
     userSources = await Store.loadUserSources();

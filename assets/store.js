@@ -26,6 +26,14 @@
     const day = String(x.getDate()).padStart(2, '0');
     return y + '-' + m + '-' + day;
   }
+  // 由时间戳（毫秒）或 Date 得到 YYYY-MM-DD
+  function dateStr(t) {
+    const x = (t instanceof Date) ? t : new Date(t);
+    const y = x.getFullYear();
+    const m = String(x.getMonth() + 1).padStart(2, '0');
+    const day = String(x.getDate()).padStart(2, '0');
+    return y + '-' + m + '-' + day;
+  }
   function defaultSettings() {
     return {
       dataDir: '',                 // 空 = 默认（exe 同级 data）
@@ -35,10 +43,12 @@
       smartClean: true,            // 智能正文清理：移除菜单/图标/广告等噪声，仅保留标题/正文/图片
       backgroundRefresh: true,     // 关闭窗口后保留进程后台自动刷新新闻（可在设置页关闭）
       fetchMode: 'balanced',       // 新闻获取模式：min(串行最省) / balanced(推荐) / max(高并发最快)
+      fetchMonth: false,           // 新闻保留窗口：false=近 7 天；true=近 30 天（近七天无新内容时也可自动扩展）
       refreshIntervalMinutes: 30,
       autoRefresh: true,
       autoRefreshOnStart: true,
       sources: {},                 // { sourceId: true/false } 启停，默认 true
+      updateLine: 'github',        // 'github'(首选) | 'gitee'(备用)：更新检查线路，写死在 updater.js
       hot: {                       // 热搜榜单开关与显示条数
         weibo: true,
         baidu: true,
@@ -58,6 +68,52 @@
 
   function dedupeKey(it) {
     return [it.title || '', it.link || '', it.timestamp || 0, it.source || ''].join('||');
+  }
+
+  // ---------- 新闻时间窗口（近 7 天 / 近 30 天） ----------
+  // 设计目标（用户需求）：
+  //   1) 只保留当前日期近一周内的新闻，按发布日期优先（今天 > 昨天 > … > 6 天前）；
+  //   2) 近七天若连续多次刷新都无新内容，视为"已抓完"，可自动扩展到近一个月；
+  //   3) 是否获取近一个月新闻由设置页开关控制（常开则直接 30 天）。
+  // 实现：每条新闻按其"发布日期"分文件落盘（news_cache_<发布日期>.json），
+  //       加载/合并时只保留窗口内的项；无发布时间的项按抓取日保留。
+  const WINDOW_WEEK_DAYS = 7;
+  const WINDOW_MONTH_DAYS = 30;
+  let _settings = defaultSettings();
+  function setSettings(s) { if (s) _settings = Object.assign(defaultSettings(), s); }
+  function nowMs() { return Date.now(); }
+  function isUndated(it) { return !it.timestamp || it.timestamp <= 0; }
+  function publishDateStr(it) {
+    if (isUndated(it)) return todayStr();
+    return dateStr(it.timestamp);
+  }
+  function withinWindow(it, days) {
+    if (isUndated(it)) return true; // 无发布时间的新闻按抓取日保留，不丢弃
+    const start = nowMs() - days * 86400000;
+    return it.timestamp >= start;
+  }
+  function effectiveDays(ws) {
+    ws = ws || {};
+    return (_settings.fetchMonth || ws.sevenDaySaturated) ? WINDOW_MONTH_DAYS : WINDOW_WEEK_DAYS;
+  }
+  async function currentWindowDays() { return effectiveDays(await loadWindowState()); }
+
+  // 窗口状态：记录近 7 天连续无新内容的刷新次数，用于自动扩展到近 30 天
+  const WINDOW_STATE_FILE = 'news_window_state.json';
+  async function loadWindowState() {
+    try { const raw = await global.electronAPI.storage.read(WINDOW_STATE_FILE); return raw ? JSON.parse(raw) : {}; }
+    catch (_) { return {}; }
+  }
+  async function saveWindowState(s) {
+    try { await global.electronAPI.storage.write(WINDOW_STATE_FILE, JSON.stringify(s)); } catch (_) {}
+  }
+  // added7 = 本次刷新在近 7 天窗口内"新增"的条数；返回当前生效的窗口天数
+  async function recordWindowSaturation(added7) {
+    const ws = await loadWindowState();
+    ws.staleCount = (added7 > 0) ? 0 : (ws.staleCount || 0) + 1;
+    if (ws.staleCount >= 3) ws.sevenDaySaturated = true;
+    await saveWindowState(ws);
+    return effectiveDays(ws);
   }
 
   // ---------- 设置 ----------
@@ -86,6 +142,7 @@
   async function loadCachedNews() {
     if (!isElectron) return [];
     try {
+      const days = await currentWindowDays();
       const files = await global.electronAPI.storage.list('cache');
       const map = new Map();
       for (const f of files) {
@@ -95,6 +152,7 @@
         let arr = [];
         try { arr = JSON.parse(raw); } catch (_) { continue; }
         for (const it of arr) {
+          if (!withinWindow(it, days)) continue; // 仅保留窗口内的新闻
           const k = dedupeKey(it);
           if (!map.has(k)) map.set(k, it);
         }
@@ -103,18 +161,21 @@
     } catch (_) { return []; }
   }
 
-  // 把本次刷新结果与现有缓存合并去重；新增的写入今日缓存文件
+  // 把本次刷新结果与现有缓存合并去重；按"发布日期"分文件落盘；返回 { merged, added, added7 }
   async function mergeAndPersist(newItems) {
+    const days = await currentWindowDays();
     const existing = await loadCachedNews();
     const map = new Map();
     for (const it of existing) map.set(dedupeKey(it), it);
-    let added = 0;
+    let added = 0, added7 = 0;
     for (const it of newItems) {
+      if (!withinWindow(it, days)) continue; // 超出窗口的新闻不写入（保持列表新鲜）
       const k = dedupeKey(it);
       if (!map.has(k)) {
-        it.cachedDate = todayStr();
+        it.cachedDate = publishDateStr(it); // 标记其发布日期，便于"获取某一天"
         map.set(k, it);
         added++;
+        if (withinWindow(it, WINDOW_WEEK_DAYS)) added7++; // 统计近 7 天内的新增
       } else {
         // 已存在：用本次更新的 content/cover 覆盖（若更新了）
         const old = map.get(k);
@@ -124,23 +185,31 @@
     }
     const merged = Array.from(map.values());
 
-    // 写入今日缓存文件（仅今日抓取的新增项）
+    // 按发布日期分文件落盘（news_cache_<发布日期>.json）
+    const byDate = new Map();
+    for (const it of merged) {
+      const ds = publishDateStr(it);
+      if (!byDate.has(ds)) byDate.set(ds, []);
+      byDate.get(ds).push(it);
+    }
+    for (const [ds, arr] of byDate) {
+      try {
+        await global.electronAPI.storage.write('cache/' + CACHE_PREFIX + ds + CACHE_SUFFIX, JSON.stringify(arr, null, 2));
+      } catch (_) { /* ignore */ }
+    }
+
+    // 清理超过 30 天的旧缓存文件，避免无限增长（窗口再次扩大时这些文件已无价值）
     try {
-      const today = todayStr();
-      const file = 'cache/' + CACHE_PREFIX + today + CACHE_SUFFIX;
-      const oldRaw = await global.electronAPI.storage.read(file);
-      let todayArr = [];
-      if (oldRaw) { try { todayArr = JSON.parse(oldRaw); } catch (_) { todayArr = []; } }
-      const todayMap = new Map();
-      for (const it of todayArr) todayMap.set(dedupeKey(it), it);
-      for (const it of newItems) {
-        const k = dedupeKey(it);
-        if (!todayMap.has(k)) { it.cachedDate = today; todayMap.set(k, it); }
+      const files = await global.electronAPI.storage.list('cache');
+      const cutoff = todayStr(new Date(Date.now() - (WINDOW_MONTH_DAYS + 1) * 86400000));
+      for (const f of files) {
+        if (!f.startsWith(CACHE_PREFIX) || !f.endsWith(CACHE_SUFFIX)) continue;
+        const ds = f.slice(CACHE_PREFIX.length, -CACHE_SUFFIX.length);
+        if (ds < cutoff) { try { await global.electronAPI.storage.deleteFile('cache/' + f); } catch (_) {} }
       }
-      await global.electronAPI.storage.write(file, JSON.stringify(Array.from(todayMap.values()), null, 2));
     } catch (_) { /* ignore */ }
 
-    return merged;
+    return { merged, added, added7 };
   }
 
   // 清理某个日期或全部缓存
@@ -231,7 +300,9 @@
     dedupeKey,
     defaultSettings,
     loadSettings, saveSettings,
+    setSettings,
     loadCachedNews, mergeAndPersist,
+    currentWindowDays, recordWindowSaturation,
     clearCacheDate, clearAllCache,
     loadFavorites, saveFavorites,
     cacheImage,

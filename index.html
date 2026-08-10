@@ -65,6 +65,13 @@
           <label>起 <input type="date" id="date-from" /></label>
           <label>止 <input type="date" id="date-to" /></label>
           <button id="time-clear" class="btn-ghost">清除时段</button>
+          <div class="range-quick" id="range-quick">
+            <button class="chip sm" data-range="today">今天</button>
+            <button class="chip sm" data-range="3">近3天</button>
+            <button class="chip sm" data-range="7">近7天</button>
+            <button class="chip sm" data-range="30">近30天</button>
+            <button id="refresh-range-btn" class="btn-ghost sm">刷新此范围</button>
+          </div>
         </div>
       </div>
 
@@ -123,8 +130,22 @@
       <aside class="hot-section">
         <div class="section-head"><h2>热搜榜单</h2></div>
         <div class="hot-tabs" id="hot-tabs"></div>
-        <div id="hot-list" class="hot-list">
-          <div class="placeholder">刷新后显示热搜…</div>
+        <div class="hot-list-wrap">
+          <div id="hot-list" class="hot-list">
+            <div class="placeholder">刷新后显示热搜…</div>
+          </div>
+          <div id="hot-progress-ring" class="hot-ring hidden" aria-hidden="true">
+            <div class="ring-inner">
+              <div class="ring-track">
+                <svg viewBox="0 0 120 120" class="ring-svg">
+                  <circle class="ring-bg" cx="60" cy="60" r="52"></circle>
+                  <circle class="ring-fg" cx="60" cy="60" r="52"></circle>
+                </svg>
+                <span class="ring-pct" id="hot-ring-pct">0%</span>
+              </div>
+              <span class="ring-label">榜单刷新中…</span>
+            </div>
+          </div>
         </div>
         <div class="legend">
           <h3>信源分级说明</h3>
@@ -237,7 +258,7 @@
   <!-- ===== 设置页面 ===== -->
   <div id="page-settings" class="page">
     <main class="settings-layout">
-      <!-- 左栏：常规设置 -->
+      <!-- 左栏：常规设置 + 热搜榜单 -->
       <div class="settings-col">
         <div class="settings-card">
           <h3>运作机制</h3>
@@ -262,6 +283,10 @@
             </select>
           </label>
           <p class="set-hint">最小性能占用 = 串行抓取（最省资源）；平衡 = 适中并发 + 条件请求；最高速度 = 高并发 + 条件请求，刷新最快但占用更多资源。</p>
+          <label class="set-row">
+            <span>获取近一个月新闻<small class="set-sub">近七天连续无新内容时自动扩展窗口；也可常开直接保留 30 天</small></span>
+            <span class="ios-toggle"><input type="checkbox" id="set-fetch-month" /><span class="toggle-track"></span></span>
+          </label>
         </div>
 
         <div class="settings-card">
@@ -300,7 +325,7 @@
 
         <div class="settings-card">
           <h3>热搜榜单</h3>
-          <p class="set-hint">勾选要在首页展示并抓取的榜单。</p>
+          <p class="set-hint">勾选要在首页展示并抓取的榜单。知乎/微博等平台没有官方免费热搜 API，当前使用公开聚合接口；若长期抓不到，可在 sources.js 中替换 url。</p>
           <div id="settings-hot" class="settings-hot-grid">
             <label class="ios-toggle-label"><span class="ios-toggle"><input type="checkbox" data-hot="weibo" /><span class="toggle-track"></span></span> 微博热搜</label>
             <label class="ios-toggle-label"><span class="ios-toggle"><input type="checkbox" data-hot="baidu" /><span class="toggle-track"></span></span> 百度热搜</label>
@@ -312,31 +337,9 @@
             <input type="number" id="set-hot-maxitems" min="5" max="100" value="30" />
           </label>
         </div>
-      </div>
 
-      <!-- 右栏：信源管理（充分利用右侧空间） -->
-      <div class="settings-col">
-        <div class="settings-card source-manage-settings">
-          <div class="set-card-head">
-            <h3>信源管理</h3>
-            <span id="settings-sources-count" class="count">0 个</span>
-          </div>
-          <p class="set-hint">选择要抓取的信源，取消勾选将跳过该源。支持搜索与批量开关。</p>
-          <div class="settings-sources-toolbar">
-            <div class="search-main mini">
-              <span class="search-icon">🔍</span>
-              <input type="text" id="set-sources-search" placeholder="搜索信源名称…" />
-            </div>
-            <button id="set-sources-enable" class="btn-ghost">批量启用</button>
-            <button id="set-sources-disable" class="btn-ghost">批量禁用</button>
-          </div>
-          <div id="settings-sources" class="settings-sources-list"></div>
-        </div>
-      </div>
-
-      <!-- 底部跨栏：两列并排，减少空白 -->
-      <div class="settings-col wide settings-bottom-grid">
-        <div class="settings-card">
+        <!-- 地图 API：当前地图模块未启用，隐藏该卡片但保留设置字段 -->
+        <div class="settings-card hidden" id="geo-settings-card">
           <h3>地图 API（合规要求）</h3>
           <p class="set-hint">地图使用合规底图，请在下方填入申请的 Key；未填则地图页不可用。</p>
           <label class="set-row">
@@ -356,6 +359,49 @@
             <input type="text" id="set-geo-style" placeholder="在控制台创建的个性化样式 ID" />
           </label>
         </div>
+      </div>
+
+      <!-- 右栏：更新 + 信源管理 + 数据与缓存 -->
+      <div class="settings-col">
+        <!-- 更新（独立板块，拉宽放在右栏以获得更舒展的空间） -->
+        <div class="settings-card update-card">
+          <h3>更新</h3>
+          <p class="set-hint">选择更新检查线路。默认首选 GitHub；国内网络访问不畅时可切换到备用 Gitee。</p>
+          <label class="set-row update-line-row">
+            <span>更新线路</span>
+            <div class="line-toggle" id="update-line-toggle" role="switch" aria-checked="true" tabindex="0" aria-label="更新线路：首选 GitHub（默认）/ 备用 Gitee">
+              <span class="line-opt line-opt-left">首选</span>
+              <span class="line-opt line-opt-right">备用</span>
+              <span class="line-knob"></span>
+            </div>
+          </label>
+          <p class="set-hint">首选 = GitHub · 备用 = Gitee。线路仅决定优先访问哪个源，失败会自动回退到另一个，无需填写任何链接。</p>
+          <div class="set-row cleanup update-actions">
+            <button id="check-update-btn" class="btn-primary">检查更新</button>
+            <span class="update-status" id="update-status"></span>
+            <div id="update-bar-wrap" class="update-bar-wrap hidden">
+              <div class="update-bar-track"><div id="update-bar-fill" class="update-bar-fill"></div></div>
+              <span id="update-bar-pct" class="update-bar-pct">0%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-card source-manage-settings">
+          <div class="set-card-head">
+            <h3>信源管理</h3>
+            <span id="settings-sources-count" class="count">0 个</span>
+          </div>
+          <p class="set-hint">选择要抓取的信源，取消勾选将跳过该源。支持搜索与批量开关。</p>
+          <div class="settings-sources-toolbar">
+            <div class="search-main mini">
+              <span class="search-icon">🔍</span>
+              <input type="text" id="set-sources-search" placeholder="搜索信源名称…" />
+            </div>
+            <button id="set-sources-enable" class="btn-ghost">批量启用</button>
+            <button id="set-sources-disable" class="btn-ghost">批量禁用</button>
+          </div>
+          <div id="settings-sources" class="settings-sources-list"></div>
+        </div>
 
         <div class="settings-card">
           <h3>数据与缓存</h3>
@@ -363,15 +409,7 @@
             <span>数据根目录（留空 = 程序目录 data/；修改后重启生效）</span>
             <input type="text" id="set-datadir" placeholder="留空 = 程序目录下的 data/" />
           </label>
-          <label class="set-row col">
-            <span>更新源 URL（留空 = 默认 GitHub / Gitee）</span>
-            <input type="text" id="set-update-url" placeholder="https://example.com/version.json" />
-          </label>
-          <label class="set-row col">
-            <span>镜像地址（逗号分隔，可选）</span>
-            <input type="text" id="set-update-mirrors" placeholder="https://mirror1.com/version.json, https://mirror2.com/version.json" />
-          </label>
-          <p class="set-hint">当前版本：<span id="set-current-version">—</span> · 留空时使用内置默认源；配置后用于跨设备或国内网络分发。</p>
+          <p class="set-hint">当前版本：<span id="set-current-version">—</span> · 更新线路请在上方「更新」板块选择（GitHub 首选 / Gitee 备用）。</p>
           <p class="set-hint">当前：<span id="set-current-datadir">—</span></p>
           <div class="cache-stats">
             <div class="cache-stat"><span class="cache-stat-label">图片缓存</span><span id="stat-image-size" class="cache-stat-val">—</span></div>
@@ -385,7 +423,6 @@
             <button id="clear-news" class="btn-danger">清新闻缓存</button>
             <button id="clear-all" class="btn-danger">清空全部</button>
             <button id="refresh-stats" class="btn-ghost">刷新统计</button>
-            <button id="check-update-btn" class="btn-primary">检查更新</button>
           </div>
           <p id="cache-clear-result" class="verify-result"></p>
           <p id="clear-result" class="verify-result"></p>
@@ -552,6 +589,21 @@
   <script src="assets/store.js"></script>
   <script src="assets/app.js"></script>
   <script src="assets/chart.umd.min.js"></script>
+
+  <!-- 更新状态提示弹窗（替代原生 dialog，Apple 风格） -->
+  <div id="update-status-modal" class="modal hidden">
+    <div class="modal-backdrop" id="update-status-backdrop"></div>
+    <div class="modal-card update-status-card" role="dialog" aria-modal="true" aria-labelledby="update-status-title">
+      <div class="update-status-icon" id="update-status-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+      </div>
+      <h3 id="update-status-title">已是最新版本</h3>
+      <p id="update-status-message">当前版本 v1.0.0，已是最新。</p>
+      <p id="update-status-detail" class="update-status-detail">你正在使用最新版本，无需更新。</p>
+      <button id="update-status-ok" class="btn-primary">确定</button>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

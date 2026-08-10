@@ -23,7 +23,7 @@
  * }
  */
 
-const { ipcMain, shell, dialog, app } = require('electron');
+const { ipcMain, shell, app } = require('electron');
 const https = require('https');
 const http = require('http');
 const fs = require('fs');
@@ -90,19 +90,40 @@ function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS) {
   });
 }
 
-// 顺序尝试多个源，任一成功即返回
-async function tryFetchInfo(urls) {
+// 顺序尝试多个源，任一成功即返回；onAttempt(url, index, state, err) 用于向前端反馈源切换
+async function tryFetchInfo(urls, onAttempt) {
   let lastErr;
-  for (const url of urls) {
-    try { return await fetchJson(url); }
-    catch (e) { lastErr = e; console.log('[updater] fetch failed:', url, e.message); }
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    if (onAttempt) onAttempt(url, i, 'start');
+    try {
+      const info = await fetchJson(url);
+      if (onAttempt) onAttempt(url, i, 'success');
+      return info;
+    } catch (e) {
+      lastErr = e;
+      console.log('[updater] fetch failed:', url, e.message);
+      if (onAttempt) onAttempt(url, i, 'fail', e);
+    }
   }
   throw lastErr || new Error('all update sources failed');
 }
 
-// 读取用户自定义 version.json 源（设置页：主源 + 镜像），否则用内置默认
+// 统一向前端发送更新状态消息；silent=true 表示只更新设置页标签，不弹窗
+function sendStatus(type, title, message, detail, silent) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('update-status-message', {
+    type, title, message, detail, silent: !!silent
+  });
+}
+
+// 更新检查线路（写死在代码内，不在设置页暴露自定义链接填写框）
+const GITHUB_VERSION_URL = 'https://raw.githubusercontent.com/NGstar315/PrivateNewsCenter/master/version.json';
+const GITEE_VERSION_URL = 'https://gitee.com/NGstar/PrivateNewsCenter/raw/master/version.json';
+
+// 读取用户在设置页选择的更新线路（首选=GitHub / 备用=Gitee），其余地址全部写死
 function readVersionUrls() {
-  let urls = [];
+  let preferred = 'github';
   try {
     const exeDir = path.dirname(app.getPath('exe'));
     const candidate = path.join(exeDir, 'data');
@@ -119,18 +140,14 @@ function readVersionUrls() {
     const settingsPath = path.join(dataDir, 'settings.json');
     if (fs.existsSync(settingsPath)) {
       const s = JSON.parse(fs.readFileSync(settingsPath, 'utf-8') || '{}');
-      if (s.updateUrl) urls.push(s.updateUrl);
-      if (Array.isArray(s.updateMirrors)) urls.push(...s.updateMirrors);
+      if (s.updateLine === 'gitee') preferred = 'gitee';
     }
   } catch (_) { /* ignore */ }
 
-  if (urls.length === 0) {
-    urls = [
-      'https://raw.githubusercontent.com/NGstar315/PrivateNewsCenter/master/version.json',
-      'https://gitee.com/你的用户名/PrivateNewsCenter/raw/master/version.json'
-    ];
-  }
-  return urls;
+  // 首选源在前，另一个作为自动回退（双源容灾）
+  return preferred === 'gitee'
+    ? [GITEE_VERSION_URL, GITHUB_VERSION_URL]
+    : [GITHUB_VERSION_URL, GITEE_VERSION_URL];
 }
 
 // 把 version.json 里的 asar/installer 字段统一成 {url, mirror}
@@ -164,19 +181,22 @@ function buildInfo(info) {
 }
 
 // 检查更新：返回 info（有更新）或 null（已最新/失败）。有更新时同时推送事件供自动提示。
+// 当 showNoUpdateDialog=true（用户主动点击"检查更新"）时，会实时反馈状态标签，并在发现更新后自动下载安装。
 async function checkForUpdates(showNoUpdateDialog = false) {
   if (!mainWindow || mainWindow.isDestroyed()) return null;
   const urls = readVersionUrls();
   try {
-    const info = await tryFetchInfo(urls);
+    sendStatus('checking', '正在检查…', '正在连接更新服务器…', null, true);
+    const info = await tryFetchInfo(urls, (url, idx, state) => {
+      if (state === 'fail' && idx < urls.length - 1) {
+        sendStatus('checking-source', '连接失败，正在替换备用源', `源 ${idx + 1} 连接失败，正在尝试备用源…`, null, true);
+      }
+    });
     if (!info || !info.version) throw new Error('invalid version.json');
 
     if (compareVersion(info.version, currentVersion) <= 0) {
       if (showNoUpdateDialog) {
-        dialog.showMessageBox(mainWindow, {
-          type: 'info', title: '已是最新版本',
-          message: `当前版本 v${currentVersion}，已是最新。`, buttons: ['确定']
-        });
+        sendStatus('info', '已是最新版本', `当前版本 v${currentVersion}，已是最新。`, '你正在使用最新版本，无需更新。');
       }
       return null;
     }
@@ -186,15 +206,24 @@ async function checkForUpdates(showNoUpdateDialog = false) {
       lastNotifiedVersion = info.version;
       mainWindow.webContents.send('update-available', built);
     }
+
+    // 用户主动触发：自动完成下载+安装
+    if (showNoUpdateDialog) {
+      sendStatus('connected', '连接成功，正在获取更新', `发现新版本 v${info.version}，开始下载更新内容…`, null, true);
+      const result = await downloadUpdate(built);
+      if (result.ok && result.restart) {
+        sendStatus('success', '下载完成', '更新内容已下载，即将自动重启安装新版本。', null, false);
+      } else if (result.needsInstaller) {
+        sendStatus('info', '需要完整安装包', '当前版本跨度较大，无法热更新，请下载完整安装包手动更新。', result.url);
+      } else {
+        sendStatus('warning', '更新失败', result.reason || '下载或安装失败，请稍后再试。');
+      }
+    }
     return built;
   } catch (e) {
     console.log('[updater] check failed:', e.message);
     if (showNoUpdateDialog) {
-      dialog.showMessageBox(mainWindow, {
-        type: 'warning', title: '检查更新失败',
-        message: '无法连接到更新服务器，请检查网络或稍后再试。',
-        detail: e.message, buttons: ['确定']
-      });
+      sendStatus('warning', '无法连接，请检查网络', e.message);
     }
     return null;
   }

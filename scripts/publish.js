@@ -22,7 +22,7 @@ const root = path.resolve(__dirname, '..');
 function read(p) { return fs.readFileSync(path.join(root, p), 'utf-8'); }
 function write(p, c) { fs.writeFileSync(path.join(root, p), c, 'utf-8'); }
 
-function bumpVersion(newVersion) {
+function bumpVersion(newVersion, giteeUser) {
   // package.json
   const pkgPath = 'package.json';
   const pkg = JSON.parse(read(pkgPath));
@@ -45,7 +45,8 @@ function bumpVersion(newVersion) {
     try { v = JSON.parse(read(versionPath)); } catch (_) {}
   }
   const ghBase = `https://github.com/NGstar315/PrivateNewsCenter/releases/download/v${newVersion}`;
-  const gtBase = `https://gitee.com/你的用户名/PrivateNewsCenter/releases/download/v${newVersion}`;
+  const giteeName = giteeUser || '你的用户名';
+  const gtBase = `https://gitee.com/${giteeName}/PrivateNewsCenter/releases/download/v${newVersion}`;
   v.version = newVersion;
   v.asar = {
     url: `${ghBase}/app.asar`,
@@ -68,9 +69,14 @@ function bumpVersion(newVersion) {
   console.log('  3. 把 version.json 提交到仓库根目录或上传到你的更新服务器。');
 }
 
-const v = process.argv[2];
-if (!v || !/^\d+\.\d+\.\d+/.test(v)) {
-  console.error('请提供版本号，例如：node scripts/publish.js 1.1.8');
-  process.exit(1);
+module.exports = { bumpVersion };
+
+if (require.main === module) {
+  const v = process.argv[2];
+  const g = process.argv[3]; // 可选：Gitee 用户名（填了就直接写进 mirror 地址）
+  if (!v || !/^\d+\.\d+\.\d+/.test(v)) {
+    console.error('请提供版本号，例如：node scripts/publish.js 1.1.8 [Gitee用户名]');
+    process.exit(1);
+  }
+  bumpVersion(v, g);
 }
-bumpVersion(v);
