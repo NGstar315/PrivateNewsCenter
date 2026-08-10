@@ -62,7 +62,7 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-// GitHub API 封装
+// GitHub API 封装（带 30s 超时，避免网络半开时无限挂起）
 async function gh(method, urlPath, { body, isBinary = false } = {}) {
   const url = `${API}${urlPath}`;
   const headers = {
@@ -74,10 +74,16 @@ async function gh(method, urlPath, { body, isBinary = false } = {}) {
   let payload;
   if (isBinary) { headers['Content-Type'] = 'application/octet-stream'; payload = body; }
   else if (body) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
-  const res = await fetch(url, { method, headers, body: payload });
-  const text = await res.text();
-  let json; try { json = JSON.parse(text); } catch { json = { _raw: text }; }
-  return { status: res.status, json };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const res = await fetch(url, { method, headers, body: payload, signal: ctrl.signal });
+    const text = await res.text();
+    let json; try { json = JSON.parse(text); } catch { json = { _raw: text }; }
+    return { status: res.status, json };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // 获取或创建 Release（GitHub 在 tag 不存在时会自动创建 tag，指向默认分支）
@@ -113,30 +119,47 @@ async function uploadAsset(releaseId, filePath) {
 function pushCode() {
   console.log('▶ 推送源码到 GitHub (' + OWNER + '/' + REPO + ') ...');
   const remote = `https://${token}@github.com/${OWNER}/${REPO}.git`;
-  const steps = [
-    ['git', 'add', '-A'],
-    ['git', 'commit', '-m', `release ${tag}`],
-    ['git', 'push', remote, 'master'],
-    ['git', 'push', remote, '--tags'],
-  ];
-  for (const s of steps) {
-    const r = spawnSync(s[0], s.slice(1), { cwd: root, stdio: 'inherit' });
-    if (r.status !== 0) {
-      console.error('⚠️ git 步骤未成功（可能无改动或与远端冲突），已跳过后续 git 步骤：' + s.join(' '));
-      break;
-    }
+  // 1) 暂存所有改动
+  spawnSync('git', ['add', '-A'], { cwd: root, stdio: 'inherit' });
+  // 2) 仅当有暂存改动时才提交（避免"无改动"导致后续 push 被跳过）
+  const diff = spawnSync('git', ['diff', '--cached', '--quiet'], { cwd: root });
+  if (diff.status === 0) {
+    console.log('ℹ️ 工作区已干净，无需提交，直接推送');
+  } else {
+    const c = spawnSync('git', ['commit', '-m', `release ${tag}`], { cwd: root, stdio: 'inherit' });
+    if (c.status !== 0) console.error('⚠️ git commit 失败（请检查钩子/提交信息），继续尝试推送');
   }
+  // 3) 始终尝试推送（已最新则 no-op）
+  const p = spawnSync('git', ['push', remote, 'master'], { cwd: root, stdio: 'inherit' });
+  if (p.status !== 0) console.error('⚠️ git push 失败（可能网络不可达或与远端冲突）');
+  const t = spawnSync('git', ['push', remote, '--tags'], { cwd: root, stdio: 'inherit' });
+  if (t.status !== 0) console.error('⚠️ git push --tags 失败');
 }
 
 (async () => {
-  console.log('🚀 开始上传到 GitHub：' + OWNER + '/' + REPO + ' @ ' + tag);
-  console.log('   待上传文件：' + files.map(f => path.basename(f)).join('、'));
-  pushCode(); // 先推代码，让 tag 指向最新提交
-  const rel = await getOrCreateRelease();
-  for (const f of files) await uploadAsset(rel.id, f);
-  console.log('');
-  console.log('════════════════════════════════════════════');
-  console.log('✅ GitHub 上传流程结束（失败项见上方 ❌）');
-  console.log('🔗 Release 页：https://github.com/' + OWNER + '/' + REPO + '/releases/' + tag);
-  console.log('════════════════════════════════════════════');
+  try {
+    console.log('🚀 开始上传到 GitHub：' + OWNER + '/' + REPO + ' @ ' + tag);
+    console.log('   待上传文件：' + files.map(f => path.basename(f)).join('、'));
+    pushCode(); // 先推代码，让 tag 指向最新提交
+    const rel = await getOrCreateRelease();
+    for (const f of files) await uploadAsset(rel.id, f);
+    console.log('');
+    console.log('════════════════════════════════════════════');
+    console.log('✅ GitHub 上传流程结束（失败项见上方 ❌）');
+    console.log('🔗 Release 页：https://github.com/' + OWNER + '/' + REPO + '/releases/' + tag);
+    console.log('════════════════════════════════════════════');
+  } catch (e) {
+    const net = /fetch failed|network|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|timeout|AbortError|getaddrinfo|ECONNRESET/i.test(e.message || '');
+    console.error('');
+    console.error('════════════════════════════════════════════');
+    if (net) {
+      console.error('❌ GitHub 网络不可达：无法连接 api.github.com（' + (e.message || e) + '）');
+      console.error('   可能原因：当前网络环境无法访问 GitHub（如区域性网络限制）。');
+      console.error('   建议：① Gitee 备用源不受影响，发布将继续；② 如需双云端，请在可访问 GitHub 的网络/代理下重试本步。');
+    } else {
+      console.error('❌ GitHub 上传异常：' + (e.message || e));
+    }
+    console.error('════════════════════════════════════════════');
+    process.exit(1);
+  }
 })();

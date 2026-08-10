@@ -1,15 +1,15 @@
 {
-  "version": "1.1.7",
+  "version": "1.1.8",
   "minVersion": "1.0.0",
-  "releaseNotes": "新闻按发布日期智能排序（优先近 7 天，可在设置切换近 1 个月视图）；热搜榜单改为独立并发刷新并新增环形加载进度；支持按指定日期/时间段检索；「检查更新」升级为自定义弹窗，新增状态标签与下载进度条（完成后变绿）并自动安装；增量热更新（asar 热交换 + 覆盖层兜底）稳定性增强。",
+  "releaseNotes": "1.1.8（维护版）：增强开发者发版与双云端上传流程的健壮性——GitHub 主源网络不可达时自动跳过并继续 Gitee 上传，连接测试新增 API 探测与明确诊断提示；客户端自动更新双源（GitHub/Gitee）容灾策略保持不变。本版无功能性 breaking 变更。",
   "electronVersion": "31.3",
   "asar": {
-    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.7/app.asar",
-    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.7/app.asar"
+    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.8/app.asar",
+    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.8/app.asar"
   },
   "installer": {
-    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.7/PrivateNewsCenter-Setup-1.1.7.exe",
-    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.7/PrivateNewsCenter-Setup-1.1.7.exe"
+    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.8/PrivateNewsCenter-Setup-1.1.8.exe",
+    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.8/PrivateNewsCenter-Setup-1.1.8.exe"
   },
   "mandatory": false
 }

@@ -1,5 +1,5 @@
 ﻿!define APPNAME "实时新闻中心"
-!define APPVERSION "1.1.7"
+!define APPVERSION "1.1.8"
 !define PUBLISHER "PrivateNewsCenter"
 !define EXE "NewsCenter.exe"
 !define SRC "F:\MyPython\PrivateNewsCenter\dist\NewsCenter"

@@ -39,19 +39,27 @@ const build = spawnSync('node', ['scripts/build_release.js', version, giteeUser]
 if (build.status !== 0) { console.error('❌ 构建失败，中止发版'); process.exit(1); }
 
 // 2. GitHub
+let ghResult = null;
 if (tokens.github) {
   console.log('\n▶ [2/3] 上传到 GitHub ...');
-  spawnSync('node', ['scripts/upload_github.js'], { cwd: root, stdio: 'inherit', env });
+  ghResult = spawnSync('node', ['scripts/upload_github.js'], { cwd: root, stdio: 'inherit', env });
 } else {
   console.log('\n⏭️ [2/3] 未配置 GitHub 令牌，跳过（在 .release_tokens.json 填 "github" 后启用）');
 }
 
 // 3. Gitee
+let giteeResult = null;
 if (tokens.gitee) {
   console.log('\n▶ [3/3] 上传到 Gitee ...');
-  spawnSync('node', ['scripts/upload_gitee.js'], { cwd: root, stdio: 'inherit', env });
+  giteeResult = spawnSync('node', ['scripts/upload_gitee.js'], { cwd: root, stdio: 'inherit', env });
 } else {
   console.log('\n⏭️ [3/3] 未配置 Gitee 令牌，跳过（在 .release_tokens.json 填 "gitee" 后启用）');
 }
 
-console.log('\n✅ release.js 执行完毕');
+console.log('\n══════════════ 发版结果汇总 ════════════════');
+console.log('  构建    ：' + (build.status === 0 ? '✅ 成功' : '❌ 失败'));
+console.log('  GitHub ：' + (tokens.github ? (ghResult && ghResult.status === 0 ? '✅ 成功' : '⚠️ 失败/跳过（见上方日志，不影响 Gitee）') : '⏭️ 未配置令牌'));
+console.log('  Gitee  ：' + (tokens.gitee ? (giteeResult && giteeResult.status === 0 ? '✅ 成功' : '⚠️ 失败（见上方日志）') : '⏭️ 未配置令牌'));
+console.log('════════════════════════════════════════════');
+if (build.status !== 0) process.exit(1);
+console.log('✅ release.js 执行完毕');

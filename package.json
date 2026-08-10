@@ -1,6 +1,6 @@
 {
   "name": "private-news-center",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "description": "个人实时新闻中心（HTML + Electron 封装）",
   "main": "main.js",
   "author": "PrivateNewsCenter",
