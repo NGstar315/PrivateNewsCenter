@@ -7,10 +7,12 @@
  *
  * 流程：
  *   1. node scripts/build_release.js <版本> [Gitee用户]  —— 提版本 + 重打 asar + 安装版/便携版 exe + 汇总到 release/
- *   2. 若 .release_tokens.json 配置了 github  → 上传到 GitHub（含推送源码）
- *   3. 若 .release_tokens.json 配置了 gitee   → 上传到 Gitee
+ *   2. 若配置了 github 令牌  → 上传到 GitHub（含推送源码）
+ *   3. 若配置了 gitee 令牌   → 上传到 Gitee
  *
- * 令牌来自 .release_tokens.json（本地 gitignore，不入库）。缺失某一源则自动跳过该源。
+ * 令牌来源：优先读取环境变量 GITHUB_TOKEN / GITEE_TOKEN（由 DevUI dev-server 透传，
+ * 令牌只存于 DevUI 本地，不进项目仓库），回退读取项目根 .release_tokens.json。
+ * 缺失某一源则自动跳过该源。
  */
 
 const { spawnSync } = require('child_process');
@@ -25,9 +27,11 @@ if (!version) {
 }
 const giteeUser = process.argv[3] || 'NGstar';
 
-// 读取令牌配置
+// 读取令牌配置：优先使用环境变量（由 DevUI dev-server 透传），回退项目根 .release_tokens.json
 let tokens = {};
 try { tokens = JSON.parse(fs.readFileSync(path.join(root, '.release_tokens.json'), 'utf-8')); } catch (_) {}
+if (process.env.GITHUB_TOKEN) tokens.github = process.env.GITHUB_TOKEN;
+if (process.env.GITEE_TOKEN) tokens.gitee = process.env.GITEE_TOKEN;
 
 const env = { ...process.env };
 if (tokens.gitee) env.GITEE_TOKEN = tokens.gitee;
