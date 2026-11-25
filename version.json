@@ -1,15 +1,15 @@
 {
-  "version": "1.1.8",
+  "version": "1.1.9",
   "minVersion": "1.0.0",
-  "releaseNotes": "v1.1.8 更新日志（相较 v1.1.0）\n\n【新增功能】\n· 系统托盘与后台刷新：关闭窗口后程序驻留后台自动刷新新闻与热搜，可在设置开关\n· 新闻按发布日期智能排序：优先近 7 天，可切换「近 1 个月」视图\n· 指定日期 / 时间段检索：支持按任意日期或区间回溯新闻\n· 热搜榜单独立并发刷新，新增环形加载进度\n· 增量热更新（asar 热交换）：日常更新仅替换约 0.5MB 的 app.asar，后台下载、重启即用，收藏与设置天然保留；装于 Program Files 时自动走 %LOCALAPPDATA% 覆盖层，无需管理员权限\n· 检查更新自定义弹窗：状态标签 + 下载进度条（完成后变绿）并自动安装\n\n【性能与体验优化】\n· 新闻获取改为有界并发：新增「最小性能占用 / 平衡 / 最高速度」三档模式，刷新大幅提速\n· 设置页即时自动保存，无需手动保存\n· 设置页两栏重排版 + 信源列表全新 UI（搜索、批量启用/禁用、计数）\n· 日历单元格动态水波动画（可开关）\n· 波浪动画重做为无缝周期曲线，修复发布者下拉被遮挡\n\n【内容扩充】\n· 新增大量信源：国内政府/媒体，美国白宫/财政部/美联储，英国/欧盟/日本官方及 UN/World Bank/IMF 等国际机构，补全体育/文化/教育/军事/环境/科学等分类\n\n【问题修复】\n· 修复 asar 格式不兼容导致程序无法启动\n· 修复官方新闻（美联储等）正文被过滤误删\n· 修复热搜全部拉取失败（Reddit 等新增备用源）\n· 修复波浪劣质色块、被图层遮挡、安装包完整性异常\n· 修复更新源分支与双源（GitHub/Gitee）容灾，发布流程健壮性增强\n\n【更新与发布】\n· 双源更新容灾：主源 GitHub，镜像 Gitee，客户端顺序回退，国内网络自动走镜像\n· 发版流程增强：GitHub 主源不可达时自动跳过并继续 Gitee 上传，连接测试新增诊断提示",
+  "releaseNotes": "v1.1.9 更新日志\n\n【重要修复】\n· 收藏与「重点关注发布者」重启后丢失：用户数据改为存于系统用户目录（与程序目录解耦），换解压目录或升级不再丢失；写入改为「临时文件 + 原子重命名」并保留 .bak 备份，主文件损坏可自动恢复；保存失败会明确提示，不再静默失败。\n· 修复部分站点正文抓取失败（TASS / NASA APOD / ECB 等）：修正正文容器打分逻辑，站点选择器按优先级生效。\n· 修复 PDF「下载并内嵌」显示 forbidden。\n\n【新增功能】\n· 重点关注信源：发布者卡片一键关注，新闻页置顶展示、粉色边框区分；收藏页新增「新闻收藏 / 重点关注发布者」子页切换。\n· 新闻页新增「置顶收藏 / 置顶关注」开关，可随时关闭。\n· 信源自定义标签与付费标记：内置分类不可删除，用户标签可增删。\n· 在线 PDF 支持「下载并内嵌」本地阅读，下载文档纳入缓存清理范围。\n· 可选 LLM 智能助手：标题翻译、每日简报，支持 OpenAI 兼容接口与本地 Ollama。\n\n【体验优化】\n· 正文排版智能优化：图片间距、图注去重、参考文献样式、来源信息卡。\n· 收藏卡片不再因已读而淡化；普通新闻仅本轮浏览过才淡化。\n· 修复开启置顶后日期分组错乱的问题。\n· 文章弹窗底部工具栏改为常驻，可收起为悬浮按钮。",
   "electronVersion": "31.3",
   "asar": {
-    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.8/app.asar",
-    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.8/app.asar"
+    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.9/app.asar",
+    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.9/app.asar"
   },
   "installer": {
-    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.8/PrivateNewsCenter-Setup-1.1.8.exe",
-    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.8/PrivateNewsCenter-Setup-1.1.8.exe"
+    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.9/%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB%E4%B8%AD%E5%BF%83-Setup-1.1.9.exe",
+    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.9/%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB%E4%B8%AD%E5%BF%83-Setup-1.1.9.exe"
   },
   "mandatory": false
 }

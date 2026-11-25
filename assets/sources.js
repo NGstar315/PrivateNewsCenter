@@ -1357,7 +1357,33 @@ const NEWS_SOURCES = [
       background: '美国住宅建筑与房地产开发行业媒体，报道市场趋势、设计与政策。',
       logo: 'https://www.builderonline.com/favicon.ico'
     }
-  }
+  },
+
+  /* ---------- RSSHub 路由源（P2 参考，覆盖社媒/视频/技术社区等长尾） ---------- */
+  {
+    id: 'rsshub-hackernews', name: 'RSSHub·Hacker News', grade: 'P2', region: 'intl',
+    categories: ['tech'], lang: '英文',
+    url: 'https://rsshub.app/hackernews/frontpage',
+    profile: { fullName: 'Hacker News（via RSSHub）', country: '美国', politicalLean: 'neutral', background: 'Y Combinator 旗下技术社区，经 RSSHub 路由提供 RSS。', logo: 'https://news.ycombinator.com/favicon.ico' }
+  },
+  {
+    id: 'rsshub-v2ex', name: 'RSSHub·V2EX 最热', grade: 'P2', region: 'cn',
+    categories: ['tech'], lang: '中文',
+    url: 'https://rsshub.app/v2ex/hot',
+    profile: { fullName: 'V2EX（via RSSHub）', country: '中国', politicalLean: 'neutral', background: '中文技术社区，经 RSSHub 路由提供 RSS。', logo: 'https://www.v2ex.com/favicon.ico' }
+  },
+  {
+    id: 'rsshub-zhihu-hot', name: 'RSSHub·知乎热榜', grade: 'P2', region: 'cn',
+    categories: ['society'], lang: '中文',
+    url: 'https://rsshub.app/zhihu/hotlist',
+    profile: { fullName: '知乎热榜（via RSSHub）', country: '中国', politicalLean: 'neutral', background: '知乎热榜，经 RSSHub 路由提供 RSS。', logo: 'https://www.zhihu.com/favicon.ico' }
+  },
+  {
+    id: 'rsshub-github-trending', name: 'RSSHub·GitHub Trending', grade: 'P2', region: 'intl',
+    categories: ['tech'], lang: '英文',
+    url: 'https://rsshub.app/github/trending/daily',
+    profile: { fullName: 'GitHub Trending（via RSSHub）', country: '美国', politicalLean: 'neutral', background: 'GitHub 每日趋势仓库，经 RSSHub 路由提供 RSS。', logo: 'https://github.com/favicon.ico' }
+  },
 ];
 
 /* ====================== 热搜 / 热门榜单源 ====================== */

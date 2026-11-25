@@ -18,6 +18,7 @@
     </div>
     <nav class="top-nav" id="top-nav">
       <button class="nav-pill active" data-page="news">新闻</button>
+      <button class="nav-pill" data-page="favorites">收藏</button>
       <button class="nav-pill" data-page="sources">发布者</button>
       <button class="nav-pill" data-page="viz">可视化</button>
       <button class="nav-pill" data-page="map">地图</button>
@@ -112,6 +113,10 @@
         <button class="chip" id="src-toggle">选择发布者 ▾</button>
         <div id="source-filter-chips" class="source-filter-chips hidden"></div>
       </div>
+      <div class="filter-group" id="tag-tabs">
+        <span class="filter-label">标签</span>
+        <button class="chip active" data-tag="">全部</button>
+      </div>
     </section>
 
     <main class="layout">
@@ -120,6 +125,12 @@
         <div class="section-head">
           <h2>新闻流</h2>
           <span id="news-count" class="count">0 条</span>
+          <span class="head-actions">
+            <button id="pin-fav-btn" class="btn-ghost sm active" title="置顶收藏新闻（点击开关）">置顶收藏</button>
+            <button id="pin-watch-btn" class="btn-ghost sm active" title="置顶重点关注信源的资讯（点击开关）">置顶关注</button>
+            <button id="mark-all-read-btn" class="btn-ghost sm" title="将当前筛选结果全部标记为已读">已读</button>
+            <button id="export-news-btn" class="btn-ghost sm" title="导出当前筛选结果为 Markdown">导出</button>
+          </span>
         </div>
         <div id="news-grid" class="news-grid">
           <div class="placeholder">点击下方「立即刷新」开始获取最新新闻…</div>
@@ -158,6 +169,27 @@
           <div id="calendar" class="calendar"></div>
         </div>
       </aside>
+    </main>
+  </div>
+
+  <!-- ===== 收藏页面 ===== -->
+  <div id="page-favorites" class="page">
+    <main class="favorites-layout">
+      <div class="section-head">
+        <h2>我的收藏</h2>
+        <span id="fav-count" class="count">0 条</span>
+        <div class="seg-tabs" id="fav-tabs">
+          <button class="seg-btn active" data-favtab="news">新闻收藏</button>
+          <button class="seg-btn" data-favtab="watch">重点关注发布者</button>
+        </div>
+        <div class="src-actions">
+          <button id="clear-favs-btn" class="btn-secondary">清空收藏</button>
+        </div>
+      </div>
+      <div id="fav-grid" class="news-grid">
+        <div class="placeholder">正在加载收藏…</div>
+      </div>
+      <div id="fav-watch-list" class="source-grid hidden"></div>
     </main>
   </div>
 
@@ -303,6 +335,14 @@
             <span>智能正文清理</span>
             <span class="ios-toggle"><input type="checkbox" id="set-smart-clean" /><span class="toggle-track"></span></span>
           </label>
+          <label class="set-row">
+            <span>正文字号</span>
+            <select id="set-font-size">
+              <option value="s">小</option>
+              <option value="m">中（默认）</option>
+              <option value="l">大</option>
+            </select>
+          </label>
           <p class="set-hint">动画开启后会更生动；低性能设备或系统「减弱动态效果」时会自动停用。正文清理若误伤某些信源，可临时关闭。</p>
         </div>
 
@@ -321,6 +361,97 @@
             <span class="ios-toggle"><input type="checkbox" id="set-background-refresh" /><span class="toggle-track"></span></span>
           </label>
           <p class="set-hint">开启后台刷新后关闭窗口会缩到托盘继续抓取；关闭则直接退出。图片以 UUID 保存到 data/images/，可离线查看。</p>
+        </div>
+
+        <div class="settings-card">
+          <h3>订阅提醒</h3>
+          <p class="set-hint">填写关键词（用顿号 / 逗号 / 换行分隔），刷新时命中的<b>新增</b>新闻会弹系统通知。留空则关闭提醒。</p>
+          <label class="set-row col">
+            <span>关键词</span>
+            <input type="text" id="set-watchlist" placeholder="例如：降息、芯片出口、台海" />
+          </label>
+        </div>
+
+        <div class="settings-card">
+          <h3>自动规则</h3>
+          <p class="set-hint">命中规则自动执行动作（已读 / 收藏 / 隐藏）。手动收藏或打标签的新闻不会被「隐藏」。</p>
+          <div class="rule-add-row">
+            <input type="text" id="rule-pattern" placeholder="正则，如 芯片|半导体" />
+            <select id="rule-field">
+              <option value="title">标题</option>
+              <option value="source">来源</option>
+              <option value="category">分类</option>
+              <option value="region">地区</option>
+              <option value="summary">摘要</option>
+              <option value="all">全部</option>
+            </select>
+            <select id="rule-action">
+              <option value="read">已读</option>
+              <option value="favorite">收藏</option>
+              <option value="hide">隐藏</option>
+            </select>
+            <button id="rule-add" class="btn-primary">添加规则</button>
+          </div>
+          <div id="rules-list" class="rules-list"></div>
+        </div>
+
+        <div class="settings-card">
+          <h3>智能助手（可选 LLM）</h3>
+          <p class="set-hint">接入 OpenAI 兼容 API 或本地 Ollama，提供标题翻译与每日简报。未启用则不影响任何功能。</p>
+          <label class="set-row">
+            <span>启用</span>
+            <span class="ios-toggle"><input type="checkbox" id="set-llm-enabled" /><span class="toggle-track"></span></span>
+          </label>
+          <label class="set-row">
+            <span>服务商</span>
+            <select id="set-llm-provider">
+              <option value="openai">OpenAI 兼容</option>
+              <option value="ollama">Ollama（本地）</option>
+            </select>
+          </label>
+          <label class="set-row col">
+            <span>API Key（Ollama 可留空）</span>
+            <input type="text" id="set-llm-key" placeholder="sk-..." />
+          </label>
+          <label class="set-row col">
+            <span>接口地址（留空用默认）</span>
+            <input type="text" id="set-llm-base" placeholder="https://api.openai.com/v1 或 http://localhost:11434" />
+          </label>
+          <label class="set-row col">
+            <span>模型（留空用默认）</span>
+            <input type="text" id="set-llm-model" placeholder="gpt-4o-mini 或 qwen2.5" />
+          </label>
+          <label class="set-row">
+            <span>启动时自动生成简报</span>
+            <span class="ios-toggle"><input type="checkbox" id="set-llm-brief-auto" /><span class="toggle-track"></span></span>
+          </label>
+          <div class="set-row cleanup">
+            <button id="brief-btn" class="btn-primary">生成今日简报</button>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <h3>朗读（TTS）</h3>
+          <label class="set-row">
+            <span>语音源</span>
+            <select id="set-tts-provider">
+              <option value="system">系统语音（离线）</option>
+              <option value="cloud">云端语音（需 LLM Key）</option>
+            </select>
+          </label>
+          <label class="set-row col">
+            <span>语音 / 语言</span>
+            <input type="text" id="set-tts-voice" placeholder="系统：zh-CN；云端：alloy" />
+          </label>
+        </div>
+
+        <div class="settings-card">
+          <h3>网络代理</h3>
+          <p class="set-hint">部分信源或正文抓取失败时会走 CORS 代理兜底。可填自定义代理前缀（必须以 <code>url=</code> 结尾），留空则用内置代理。</p>
+          <label class="set-row col">
+            <span>代理前缀</span>
+            <input type="text" id="set-proxy-prefix" placeholder="例如：https://your-proxy/raw?url=" />
+          </label>
         </div>
 
         <div class="settings-card">
@@ -424,8 +555,36 @@
             <button id="clear-all" class="btn-danger">清空全部</button>
             <button id="refresh-stats" class="btn-ghost">刷新统计</button>
           </div>
+          <div class="set-row cleanup">
+            <button id="opml-export-btn" class="btn-ghost">导出 OPML</button>
+            <button id="opml-import-btn" class="btn-ghost">导入 OPML</button>
+            <button id="backup-btn" class="btn-ghost">备份数据</button>
+            <button id="restore-btn" class="btn-ghost">恢复数据</button>
+          </div>
+          <div class="set-row cleanup">
+            <button id="clear-downloads-btn" class="btn-ghost">清下载文档</button>
+            <span id="downloads-stats" class="verify-result"></span>
+          </div>
           <p id="cache-clear-result" class="verify-result"></p>
           <p id="clear-result" class="verify-result"></p>
+        </div>
+
+        <div class="settings-card">
+          <h3>Fever API（只读）</h3>
+          <p class="set-hint">开启后本地起只读 Fever 服务，可用 Fluent Reader 等第三方客户端同步阅读（仅本机 127.0.0.1 访问）。切换后即时生效。</p>
+          <label class="set-row">
+            <span>启用</span>
+            <span class="ios-toggle"><input type="checkbox" id="set-fever-enabled" /><span class="toggle-track"></span></span>
+          </label>
+        </div>
+
+        <div class="settings-card">
+          <h3>RSSHub</h3>
+          <p class="set-hint">已内置少量 RSSHub 路由源（知乎/B站/GitHub/HN/V2EX，P2）。可自建实例，通过「发布者 → 添加信源」填自建实例的 RSS 地址。</p>
+          <label class="set-row col">
+            <span>实例地址</span>
+            <input type="text" id="set-rsshub-base" placeholder="https://rsshub.app" />
+          </label>
         </div>
       </div>
 
@@ -468,12 +627,23 @@
 
       <div class="modal-body" id="modal-body">
         <div id="modal-content" class="modal-content"></div>
+      </div>
+
+      <!-- 常驻底部工具栏（可收起为右下角悬浮按钮） -->
+      <div class="modal-footer" id="modal-footer">
+        <div id="modal-tags" class="modal-tags"></div>
         <div class="modal-actions">
           <button id="modal-favorite" class="btn-secondary">☆ 收藏</button>
+          <button id="modal-translate" class="btn-secondary">翻译</button>
+          <button id="modal-speak" class="btn-secondary">朗读</button>
+          <button id="modal-stop-speak" class="btn-secondary">停止</button>
+          <button id="modal-immersive" class="btn-secondary">沉浸</button>
           <button id="modal-open-external" class="btn-primary">用浏览器打开原文</button>
           <button id="modal-close-btn" class="btn-secondary">关闭</button>
+          <button id="modal-footer-toggle" class="btn-ghost footer-toggle" title="收起工具栏（阅读更专注）">收起 ⌄</button>
         </div>
       </div>
+      <button id="modal-footer-fab" class="modal-footer-fab hidden" title="展开工具栏">⌃</button>
     </div>
   </div>
 
@@ -589,6 +759,18 @@
   <script src="assets/store.js"></script>
   <script src="assets/app.js"></script>
   <script src="assets/chart.umd.min.js"></script>
+
+  <!-- 简报 / 翻译结果弹窗 -->
+  <div id="brief-modal" class="modal hidden">
+    <div class="modal-backdrop" id="brief-backdrop"></div>
+    <div class="modal-card brief-card" role="dialog" aria-modal="true">
+      <button class="modal-close" id="brief-close" title="关闭">✕</button>
+      <div class="modal-body">
+        <h2 id="brief-title">结果</h2>
+        <div id="brief-content" class="modal-content"></div>
+      </div>
+    </div>
+  </div>
 
   <!-- 更新状态提示弹窗（替代原生 dialog，Apple 风格） -->
   <div id="update-status-modal" class="modal hidden">

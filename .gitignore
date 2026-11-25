@@ -5,6 +5,11 @@ node_modules/
 dist/
 dist-installer/
 release/
+# 各轮测试构建产物（体积巨大，不入库）
+dist-test*/
+dist-release/
+# 临时发版上传脚本
+_upload_release.js
 
 # 用户个人数据（收藏/设置/缓存，绝对不能入库）
 data/

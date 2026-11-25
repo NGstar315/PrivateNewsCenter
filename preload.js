@@ -31,6 +31,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   imageCache: (url) => ipcRenderer.invoke('image-cache', url),
 
+  // 系统通知（订阅关键词命中提醒等）
+  notify: (title, body) => ipcRenderer.invoke('notify', title, body),
+
+  // OPML 导入 + 备份/恢复
+  pickOpml: () => ipcRenderer.invoke('pick-opml'),
+  backupData: () => ipcRenderer.invoke('backup-data'),
+  listBackups: () => ipcRenderer.invoke('list-backups'),
+  restoreData: (name) => ipcRenderer.invoke('restore-data', name),
+
+  // LLM / 云端 TTS / Fever
+  llmChat: (opts) => ipcRenderer.invoke('llm-chat', opts),
+  ttsCloud: (opts) => ipcRenderer.invoke('tts-cloud', opts),
+  restartFeverServer: () => ipcRenderer.invoke('restart-fever'),
+  downloadFile: (url) => ipcRenderer.invoke('download-file', url),
+  downloadDocument: (url) => ipcRenderer.invoke('download-document', url),
+  clearDownloads: () => ipcRenderer.invoke('clear-downloads'),
+  downloadsInfo: () => ipcRenderer.invoke('downloads-info'),
+  fetchRendered: (url, opts) => ipcRenderer.invoke('fetch-rendered', url, opts),
+
   // 后台刷新开关（关闭窗口后是否在托盘保留进程自动刷新）
   getBackgroundRefresh: () => ipcRenderer.invoke('get-background-refresh'),
   setBackgroundRefresh: (val) => ipcRenderer.invoke('set-background-refresh', val),

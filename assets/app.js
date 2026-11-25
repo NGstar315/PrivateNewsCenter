@@ -23,14 +23,19 @@
   const state = {
     news: [],
     hot: {},
-    filters: { region: 'all', category: 'all', grade: 'all', search: '', dateFrom: '', dateTo: '', sources: new Set() },
+    filters: { region: 'all', category: 'all', grade: 'all', search: '', dateFrom: '', dateTo: '', sources: new Set(), tag: '' },
     srcFilters: { region: 'all', grade: 'all', lean: 'all', search: '' },
     hotTab: 'weibo',
     favorites: new Map(),   // favKey -> item
+    readKeys: new Map(),    // dedupeKey -> 已读时间戳
+    sessionRead: new Set(), // 本次运行期间点击浏览过的新闻（仅用于临时降透明，不持久化）
+    tags: new Map(),        // dedupeKey -> [标签]
+    sourceHealth: {},       // sourceId -> { ok, error, consecutiveFails, lastTry, lastOk }
     settings: null,
     calendarDate: null,
     vizRange: 'all',
     page: 'news',
+    favTab: 'news',         // 收藏页子页：news（新闻收藏）/ watch（重点关注发布者）
     renderLimit: 60
   };
 
@@ -38,6 +43,7 @@
   let userSources = [];  // 用户自定义信源（来自 data/user_sources.json）
   let userSourceIds = new Set();  // 用户自定义信源 id 集合（用于判断可否删除）
   let pendingNewKeys = new Set();  // 本次渲染需要"入场动画"的新闻 dedupeKey 集合（每次渲染后清空）
+  let clusterExpanded = new Set(); // 同题聚类中已展开的组 id（会话内，不持久化）
 
   // 封面图延迟加载观察器：卡片进入视口附近再真正加载图片，避免一次性发起海量请求拖慢主线程
   let coverObserver = null;
@@ -81,17 +87,22 @@
         if (ph) ph.classList.remove('hidden');
       }
     };
-    img.onload = () => done(true);
-    img.onerror = () => done(false);
-    timer = setTimeout(() => done(false), 9000);
+    const apply = (u) => {
+      img.onload = () => done(true);
+      img.onerror = () => done(false);
+      img.src = u;
+    };
+    // 缓存优先单路：命中则直接 file:// 秒开，未命中由主进程下载一次后 file:// 显示；
+    // 消除「远程直连 + 主进程下载」双下载，避免带宽翻倍与 src 替换导致的二次解码闪烁。
+    const resolveSrc = (u) => {
+      if (settings.imageCaching !== 'off') {
+        return Store.cacheImage(u, { favorite: false }).then(res => (res || u)).catch(() => u);
+      }
+      return Promise.resolve(u);
+    };
+    timer = setTimeout(() => done(false), 14000);
     wrap.appendChild(img);
-    img.src = url;
-    // 本地缓存替换（在远程加载之后再触发，避免阻塞）
-    if (settings.imageCaching !== 'off') {
-      Store.cacheImage(url, { favorite: false }).then(local => {
-        if (local && img.isConnected) img.src = local;
-      });
-    }
+    resolveSrc(url).then(src => { if (img.isConnected) apply(src); });
   }
   function showCoverPlaceholder(wrap) {
     const loader = wrap.querySelector('.img-loader');
@@ -130,6 +141,87 @@
   }
   function favKey(it) { return (it.sourceId || '') + '|' + (it.link || '') + '|' + (it.title || ''); }
   function isFav(it) { return state.favorites.has(favKey(it)); }
+  function isRead(it) { return state.readKeys.has(favKey(it)); }
+  function isWatchedSource(it) { return (settings.watchedSources || []).indexOf(it.sourceId) >= 0; }
+  function markRead(it) {
+    if (!it) return;
+    const dk = Store.dedupeKey(it);
+    // 本轮降透明：无论历史上是否已读，本次点击都记录（仅内存，重启清空）
+    state.sessionRead.add(dk);
+    const k = favKey(it);
+    if (!state.readKeys.has(k)) {
+      state.readKeys.set(k, Date.now());
+      Store.saveReadState(state.readKeys);
+    }
+    const card = document.querySelector('.card[data-key="' + CSS.escape(dk) + '"]');
+    if (card) card.classList.add('read');
+  }
+
+  // ---------- 标签 ----------
+  function getItemTags(it) { return state.tags.get(Store.dedupeKey(it)) || []; }
+  function addTag(it, tag) {
+    tag = (tag || '').trim();
+    if (!it || !tag) return;
+    const k = Store.dedupeKey(it);
+    const tags = state.tags.get(k) || [];
+    if (tags.includes(tag)) return;
+    tags.push(tag);
+    state.tags.set(k, tags);
+    Store.saveTags(state.tags);
+    renderTagChips();
+  }
+  function removeTag(it, tag) {
+    if (!it) return;
+    const k = Store.dedupeKey(it);
+    const tags = (state.tags.get(k) || []).filter(t => t !== tag);
+    if (tags.length) state.tags.set(k, tags); else state.tags.delete(k);
+    Store.saveTags(state.tags);
+    renderTagChips();
+  }
+  function allTags() {
+    const set = new Set();
+    for (const tags of state.tags.values()) for (const t of tags) set.add(t);
+    return Array.from(set).sort();
+  }
+
+  // ---------- 自动规则 ----------
+  const RULE_FIELDS = { title: '标题', source: '来源', category: '分类', region: '地区', summary: '摘要', all: '全部' };
+  const RULE_ACTIONS = { read: '已读', favorite: '收藏', hide: '隐藏' };
+  function ruleFieldText(it, field) {
+    switch (field) {
+      case 'title': return it.title || '';
+      case 'source': return it.source || '';
+      case 'category': return (it.categories || []).map(c => CATEGORY_NAMES[c] || c).join(' ');
+      case 'region': return (REGION_NAMES[it.region] || it.region || '');
+      case 'summary': return FeedParser.stripHtml(it.summary || '').trim();
+      case 'all': return [it.title, it.source, (it.categories || []).join(' '), it.region, it.summary].join(' ');
+      default: return it.title || '';
+    }
+  }
+  function matchRule(it, rule) {
+    if (!rule || rule.enabled === false || !rule.pattern) return false;
+    try { return new RegExp(rule.pattern, 'i').test(ruleFieldText(it, rule.field || 'title')); }
+    catch (_) { return false; }
+  }
+  function activeRules() { return (settings.rules || []).filter(r => r && r.enabled !== false); }
+  function isHiddenByRule(it) { return activeRules().some(r => r.action === 'hide' && matchRule(it, r)); }
+  function isHiddenEffective(it) { return isHiddenByRule(it) && !isFav(it) && getItemTags(it).length === 0; }
+  function applyRulesToItems(items) {
+    if (!items || !items.length) return;
+    const rules = activeRules().filter(r => r.action !== 'hide');
+    if (!rules.length) return;
+    let readChanged = false, favChanged = false;
+    for (const it of items) {
+      for (const r of rules) {
+        if (!matchRule(it, r)) continue;
+        const k = favKey(it);
+        if (r.action === 'read') { if (!state.readKeys.has(k)) { state.readKeys.set(k, Date.now()); readChanged = true; } }
+        else if (r.action === 'favorite') { if (!state.favorites.has(k)) { state.favorites.set(k, JSON.parse(JSON.stringify(it))); favChanged = true; } }
+      }
+    }
+    if (readChanged) Store.saveReadState(state.readKeys);
+    if (favChanged) Store.saveFavorites(Array.from(state.favorites.values()));
+  }
   function sourceWebsite(src) {
     if (!src) return '';
     const logo = src.profile && src.profile.logo;
@@ -150,6 +242,7 @@
     document.querySelectorAll('#top-nav .nav-pill').forEach(b => b.classList.toggle('active', b.dataset.page === page));
     document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + page));
     if (page === 'sources') renderSources();
+    if (page === 'favorites') renderFavorites();
     if (page === 'viz') renderViz();
     if (page === 'settings') renderSettings();
   }
@@ -179,14 +272,66 @@
     return wrap;
   }
 
+  const SANITIZE_ALLOW_TAGS = new Set([
+    'p','div','span','br','hr','h1','h2','h3','h4','h5','h6',
+    'ul','ol','li','blockquote','pre','code','em','strong','b','i','u','s','del','sub','sup',
+    'a','img','table','thead','tbody','tr','td','th','caption','figure','figcaption','picture','source'
+  ]);
+  const SANITIZE_ALLOW_ATTRS = new Set(['href','src','alt','title']);
+  function cleanSanitizedTree(root) {
+    const walk = (node) => {
+      const children = Array.from(node.childNodes || []);
+      for (const child of children) {
+        if (child.nodeType === 1) {
+          const tag = child.tagName.toLowerCase();
+          if (!SANITIZE_ALLOW_TAGS.has(tag)) { child.remove(); continue; }
+          for (const a of Array.from(child.attributes || [])) {
+            const name = a.name.toLowerCase();
+            if (name.startsWith('on') || !SANITIZE_ALLOW_ATTRS.has(name)) {
+              child.removeAttribute(a.name);
+            } else if (/^\s*(javascript|vbscript|data\s*:|file\s*:)/i.test(a.value || '')) {
+              child.removeAttribute(a.name);
+            }
+          }
+          if (tag === 'a') {
+            const href = child.getAttribute('href') || '';
+            if (href && !/^(https?:|mailto:|#|\/\/)/i.test(href.trim())) child.removeAttribute('href');
+          }
+          if (tag === 'img') {
+            const src = child.getAttribute('src') || '';
+            if (src && !/^(https?:|file:|data:image\/)/i.test(src.trim())) child.removeAttribute('src');
+          }
+          walk(child);
+        } else if (child.nodeType === 8) {
+          child.remove(); // 注释节点
+        }
+      }
+    };
+    walk(root);
+  }
+
   function sanitizeHtml(html) {
     if (!html) return '';
-    return String(html)
+    let out = String(html)
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
-      .replace(/\s(on\w+\s*=)/gi, ' data-disabled-$1')
-      .replace(/javascript:/gi, 'disabled-js:');
+      .replace(/<object[\s\S]*?<\/object>/gi, '')
+      .replace(/<embed[\s\S]*?>/gi, '')
+      .replace(/<link[\s\S]*?>/gi, '')
+      .replace(/<meta[\s\S]*?>/gi, '');
+    if (typeof DOMParser !== 'undefined') {
+      try {
+        const doc = new DOMParser().parseFromString('<div id="__san__">' + out + '</div>', 'text/html');
+        cleanSanitizedTree(doc.body);
+        const wrap = doc.getElementById('__san__');
+        out = wrap ? wrap.innerHTML : doc.body.innerHTML;
+      } catch (_) { /* 解析失败则退回正则兜底 */ }
+    }
+    return out
+      .replace(/javascript:/gi, 'disabled-js:')
+      .replace(/vbscript:/gi, 'disabled-vb:')
+      .replace(/data:text\/html/gi, 'disabled-data:');
   }
 
   // ---------- 新闻渲染（含时间分割线） ----------
@@ -206,6 +351,7 @@
     if (kw && !(it.title || '').toLowerCase().includes(kw) &&
         !(it.source || '').toLowerCase().includes(kw)) return false;
     if (f.sources.size > 0 && !f.sources.has(it.sourceId)) return false;
+    if (f.tag && !getItemTags(it).includes(f.tag)) return false;
     if (f.dateFrom || f.dateTo) {
       const t = it.timestamp || 0;
       if (f.dateFrom && t < new Date(f.dateFrom + 'T00:00:00').getTime()) return false;
@@ -214,17 +360,44 @@
     return true;
   }
 
+  // 同题聚类：标题相似度 > 0.8 且来自不同信源的新闻视为同一事件，折叠成一组
+  function clusterNews(list) {
+    const groups = [];
+    const used = new Set();
+    for (let i = 0; i < list.length; i++) {
+      if (used.has(i)) continue;
+      const a = list[i];
+      const group = { main: a, items: [a] };
+      for (let j = i + 1; j < list.length; j++) {
+        if (used.has(j)) continue;
+        const b = list[j];
+        if (b.sourceId !== a.sourceId && similarity(a.title, b.title) > 0.8) {
+          group.items.push(b);
+          used.add(j);
+        }
+      }
+      used.add(i);
+      groups.push(group);
+    }
+    return groups;
+  }
+
   // 单张卡片 DOM 构造（抽出复用，便于分片渲染）
   function buildCard(it, animate) {
     const key = Store.dedupeKey(it);
+    const fav = isFav(it);
+    const watched = isWatchedSource(it);
+    // 收藏新闻始终保持默认（不淡化）：每次刷新/切页都恢复；其它新闻仍按「本轮点击过」淡化
+    const dimmed = fav ? false : state.sessionRead.has(key);
     const card = document.createElement('article');
-    card.className = 'card' + (isFav(it) ? ' fav-mark' : '');
+    card.className = 'card' + (fav ? ' fav-mark' : '') + (watched ? ' watched-mark' : '') + (dimmed ? ' read' : '') + (isHiddenByRule(it) ? ' hidden-by-rule' : '');
     card.dataset.key = key;
     if (animate && pendingNewKeys.has(key)) card.classList.add('entering');
     const cats = (it.categories || []).map(c => CATEGORY_NAMES[c] || c).join(' · ');
     const regionText = REGION_NAMES[it.region] || it.region;
     const srcObj = SOURCES.NEWS_SOURCES.find(s => s.id === it.sourceId);
     const fallbackLogo = (srcObj && srcObj.profile && srcObj.profile.logo) || '';
+    const tags = getItemTags(it);
     card.innerHTML =
       '<div class="body">' +
         '<div class="badges">' +
@@ -239,11 +412,35 @@
           '<span>' + regionText + (it.lang ? ' · ' + it.lang : '') + '</span>' +
           '<span>' + (it.dateText || '时间未知') + '</span>' +
         '</div>' +
+        (tags.length ? '<div class="card-tags">' + tags.map(t => '<span class="tag-chip">' + esc(t) + '</span>').join('') + '</div>' : '') +
       '</div>';
     const coverWrap = createCover(it.cover, it.title, fallbackLogo);
     card.insertBefore(coverWrap, card.firstChild);
+    // hover 快捷打标按钮
+    const tagAdd = document.createElement('button');
+    tagAdd.className = 'card-tag-add';
+    tagAdd.title = '添加标签';
+    tagAdd.textContent = '＋标签';
+    tagAdd.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const t = prompt('输入标签名：');
+      if (t && t.trim()) { addTag(it, t.trim()); renderNews({ animate: false }); if (state.page === 'favorites') renderFavorites(); }
+    });
+    card.appendChild(tagAdd);
     card.addEventListener('click', () => openArticleModal(it));
     return card;
+  }
+
+  // 首次启动无缓存时的骨架屏
+  function renderNewsSkeleton() {
+    const grid = el('news-grid');
+    if (!grid) return;
+    let html = '';
+    for (let i = 0; i < 6; i++) {
+      html += '<div class="skeleton-card"><div class="skeleton-cover"></div><div class="skeleton-body">' +
+        '<div class="skeleton-line w60"></div><div class="skeleton-line w90"></div><div class="skeleton-line w40"></div></div></div>';
+    }
+    grid.innerHTML = html;
   }
 
   // 将列表按日期分组并渲染前 N 条；超过部分通过「加载更多」分批追加，避免一次性插入海量 DOM 导致掉帧
@@ -259,20 +456,45 @@
       });
     }
 
-    const list = state.news.filter(matchFilters);
+    const list = state.news.filter(it => matchFilters(it) && !isHiddenEffective(it));
+    const pinFav = settings.pinFavorites !== false;
+    const pinWatch = settings.pinWatched !== false;
+
+    // 置顶项与普通项彻底分离：置顶区单独渲染、不参与日期分组，避免「置顶后日期归属错乱」
+    const pinned = (pinFav || pinWatch)
+      ? list.filter(it => (pinFav && isFav(it)) || (pinWatch && isWatchedSource(it)))
+      : [];
+    pinned.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    const pinSet = new Set(pinned);
+    const rest = pinned.length ? list.filter(it => !pinSet.has(it)) : list;
+
     el('news-count').textContent = list.length + ' 条';
 
     if (list.length === 0) {
-      grid.innerHTML = '<div class="placeholder">没有符合条件的新闻，试试调整筛选或点「立即刷新」。</div>';
+      if (state.news.length === 0) renderNewsSkeleton();
+      else grid.innerHTML = '<div class="placeholder">没有符合条件的新闻，试试调整筛选或点「立即刷新」。</div>';
       pendingNewKeys.clear();
       return;
     }
 
     const limit = Math.max(30, state.renderLimit || 60);
-    const visible = list.slice(0, limit);
+    const visible = rest.slice(0, Math.max(0, limit - pinned.length));
+    const groups = clusterNews(visible);
     const frag = document.createDocumentFragment();
+
+    // 置顶区（不显示日期，只显示"置顶"分隔）
+    if (pinned.length) {
+      const pinDiv = document.createElement('div');
+      pinDiv.className = 'divider pinned';
+      pinDiv.innerHTML = '<span class="divider-label">置顶（收藏 / 重点关注）</span>';
+      frag.appendChild(pinDiv);
+      for (const it of pinned.slice(0, limit)) frag.appendChild(buildCard(it, animate));
+    }
+
+    // 普通区：按日期分组（从空状态开始，不受置顶影响）
     let lastMonth = '', lastDay = '';
-    for (const it of visible) {
+    for (const g of groups) {
+      const it = g.main;
       const ds = dateStr(it.timestamp || Date.now());
       const d = new Date(it.timestamp || Date.now());
       const month = ds.slice(0, 7);
@@ -291,6 +513,31 @@
       }
       lastDay = ds;
       frag.appendChild(buildCard(it, animate));
+      // 同题聚类折叠块：主卡下方展示同题报道，可展开
+      if (g.items.length > 1) {
+        const cid = Store.dedupeKey(g.main);
+        const collapsed = !clusterExpanded.has(cid);
+        const wrap = document.createElement('div');
+        wrap.className = 'cluster';
+        if (collapsed) {
+          wrap.innerHTML = '<button class="cluster-toggle">另有 ' + (g.items.length - 1) + ' 家媒体同题报道 ▸</button>';
+        } else {
+          wrap.innerHTML = '<button class="cluster-toggle">收起同题报道（' + (g.items.length - 1) + ' 家）▾</button>';
+          for (const sub of g.items.slice(1)) {
+            const row = document.createElement('button');
+            row.className = 'cluster-item';
+            row.innerHTML = '<span class="cluster-src">' + esc(sub.source || '') + '</span><span class="cluster-title">' + esc(sub.title || '') + '</span>';
+            row.addEventListener('click', () => openArticleModal(sub));
+            wrap.appendChild(row);
+          }
+        }
+        const toggle = wrap.querySelector('.cluster-toggle');
+        if (toggle) toggle.addEventListener('click', () => {
+          if (clusterExpanded.has(cid)) clusterExpanded.delete(cid); else clusterExpanded.add(cid);
+          renderNews({ animate: false });
+        });
+        frag.appendChild(wrap);
+      }
     }
 
     grid.innerHTML = '';
@@ -531,6 +778,53 @@
     for (const s of SOURCES.NEWS_SOURCES) if (!map.has(s.id)) map.set(s.id, s);
     return Array.from(map.values());
   }
+  // ---------- 重点关注信源 / 信源自定义标签 / 付费标记 ----------
+  function isWatchedSourceId(id) { return (settings.watchedSources || []).indexOf(id) >= 0; }
+  async function toggleWatchedSource(id) {
+    settings.watchedSources = settings.watchedSources || [];
+    const i = settings.watchedSources.indexOf(id);
+    if (i >= 0) settings.watchedSources.splice(i, 1);
+    else settings.watchedSources.push(id);
+    const ok = await Store.saveSettings(settings);
+    if (!ok) {
+      // 写入失败：回滚，避免"界面已关注、重启后消失"
+      if (i >= 0) settings.watchedSources.splice(i, 0, id);
+      else settings.watchedSources = settings.watchedSources.filter(x => x !== id);
+      showToast('关注保存失败，请检查数据目录是否可写');
+      return;
+    }
+    showToast(i >= 0 ? '已取消重点关注' : '已加入重点关注');
+    renderSources();
+    renderNews({ animate: false });
+    if (state.page === 'favorites') renderFavorites();
+  }
+  function getSourceUserTags(id) { return (settings.sourceUserTags || {})[id] || []; }
+  function addSourceTag(id, tag) {
+    tag = (tag || '').trim();
+    if (!tag) return;
+    settings.sourceUserTags = settings.sourceUserTags || {};
+    const arr = settings.sourceUserTags[id] || [];
+    if (arr.indexOf(tag) < 0) arr.push(tag);
+    settings.sourceUserTags[id] = arr;
+    Store.saveSettings(settings);
+    renderSources();
+  }
+  function removeSourceTag(id, tag) {
+    settings.sourceUserTags = settings.sourceUserTags || {};
+    const arr = (settings.sourceUserTags[id] || []).filter(t => t !== tag);
+    if (arr.length) settings.sourceUserTags[id] = arr; else delete settings.sourceUserTags[id];
+    Store.saveSettings(settings);
+    renderSources();
+  }
+  function isSourcePaid(id) { return !!(settings.sourcePaid || {})[id]; }
+  function toggleSourcePaid(id) {
+    settings.sourcePaid = settings.sourcePaid || {};
+    if (settings.sourcePaid[id]) delete settings.sourcePaid[id];
+    else settings.sourcePaid[id] = true;
+    Store.saveSettings(settings);
+    renderSources();
+  }
+
   function renderSources() {
     const grid = el('sources-grid');
     const f = state.srcFilters;
@@ -548,30 +842,56 @@
     });
     el('sources-count').textContent = list.length + ' 个';
     if (list.length === 0) { grid.innerHTML = '<div class="placeholder">没有符合条件的发布者。</div>'; return; }
+    // 重点关注发布者置顶（在筛选结果内排序，因此仍受筛选影响）
+    list.sort((a, b) => (isWatchedSourceId(b.id) ? 1 : 0) - (isWatchedSourceId(a.id) ? 1 : 0));
     const frag = document.createDocumentFragment();
     for (const it of list) {
       const p = it.profile || {};
       const leanText = POLITICAL_LEAN_NAMES[p.politicalLean] || p.politicalLean || '未知';
       const regionText = REGION_NAMES[it.region] || it.region || '未知';
       const logoUrl = p.logo || '';
+      const watched = isWatchedSourceId(it.id);
+      const paid = isSourcePaid(it.id);
+      const userTags = getSourceUserTags(it.id);
+      const catTags = (it.categories || []).map(c => CATEGORY_NAMES[c] || c).filter(Boolean);
       const card = document.createElement('div');
-      card.className = 'source-card';
+      card.className = 'source-card' + (watched ? ' watched-mark' : '');
       card.innerHTML =
+        '<button class="src-watch-btn' + (watched ? ' active' : '') + '" title="' + (watched ? '取消重点关注' : '加入重点关注') + '">' + (watched ? '★' : '☆') + '</button>' +
         '<div class="source-logo">' +
           (logoUrl ? '<img src="' + encodeURI(logoUrl) + '" alt="" onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\'">' +
                      '<span class="logo-ph" style="display:none">' + (it.name.charAt(0) || '📰') + '</span>'
                    : '<span class="logo-ph">' + (it.name.charAt(0) || '📰') + '</span>') +
         '</div>' +
         '<div class="source-body">' +
-          '<h3 class="source-name">' + esc(it.name) + '</h3>' +
+          '<h3 class="source-name">' + esc(it.name) + (paid ? '<span class="src-paid-badge">付费</span>' : '') + '</h3>' +
           '<div class="source-tags">' +
             '<span class="badge ' + it.grade + '">' + it.grade + '</span>' +
             '<span class="source-tag">' + regionText + '</span>' +
             '<span class="source-tag lean">' + leanText + '</span>' +
             (it.lang ? '<span class="source-tag">' + esc(it.lang) + '</span>' : '') +
           '</div>' +
+          '<div class="source-tags src-tag-edit">' +
+            catTags.map(c => '<span class="tag-chip src-cat" title="内置分类（不可删除）">' + esc(c) + '</span>').join('') +
+            userTags.map(t => '<span class="tag-chip src-user">' + esc(t) + '<button class="tag-remove" data-tag="' + esc(t) + '">×</button></span>').join('') +
+            '<button class="src-tag-add" title="添加自定义标签（仅对该发布者生效，可删除）">＋标签</button>' +
+            '<button class="src-paid-toggle' + (paid ? ' active' : '') + '" title="标记为付费信源">付费</button>' +
+          '</div>' +
           '<p class="source-bg">' + esc(p.background || '暂无背景介绍。') + '</p>' +
         '</div>';
+      card.querySelector('.src-watch-btn').addEventListener('click', (e) => { e.stopPropagation(); toggleWatchedSource(it.id); });
+      const tagAdd = card.querySelector('.src-tag-add');
+      if (tagAdd) tagAdd.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const t = prompt('添加标签（仅对该发布者生效，可删除）：');
+        if (t && t.trim()) addSourceTag(it.id, t.trim());
+      });
+      card.querySelectorAll('.tag-remove').forEach(btn => btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeSourceTag(it.id, btn.dataset.tag);
+      }));
+      const paidToggle = card.querySelector('.src-paid-toggle');
+      if (paidToggle) paidToggle.addEventListener('click', (e) => { e.stopPropagation(); toggleSourcePaid(it.id); });
       card.addEventListener('click', () => openLink(sourceWebsite(it)));
       frag.appendChild(card);
     }
@@ -749,8 +1069,42 @@
   // ---------- 文章详情弹窗 ----------
   let currentModalItem = null;
   let heroScrolled = false;
+  function renderModalTags(item) {
+    const box = el('modal-tags');
+    if (!box) return;
+    box.innerHTML = '';
+    const tags = getItemTags(item);
+    for (const t of tags) {
+      const chip = document.createElement('span');
+      chip.className = 'tag-chip';
+      const rm = document.createElement('button');
+      rm.className = 'tag-remove';
+      rm.textContent = '×';
+      rm.addEventListener('click', () => { removeTag(item, t); renderModalTags(item); renderNews({ animate: false }); });
+      chip.appendChild(document.createTextNode(t));
+      chip.appendChild(rm);
+      box.appendChild(chip);
+    }
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'tag-input';
+    input.placeholder = tags.length ? '＋ 添加标签，回车确认' : '添加标签，回车确认';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && input.value.trim()) {
+        addTag(item, input.value.trim());
+        renderModalTags(item);
+        renderNews({ animate: false });
+        if (state.page === 'favorites') renderFavorites();
+      }
+    });
+    box.appendChild(input);
+  }
+
   function openArticleModal(item) {
     currentModalItem = item;
+    markRead(item);
+    renderModalTags(item);
+    applyFooterMode(settings.modalFooter || 'docked');
     el('modal-title').textContent = item.title || '无标题';
     const cats = (item.categories || []).map(c => CATEGORY_NAMES[c] || c).join(' · ');
     const regionText = REGION_NAMES[item.region] || item.region || '';
@@ -788,6 +1142,7 @@
 
   function shouldFetchFullArticle(item) {
     if (!item || !item.link) return false;
+    if (isPdfLink(item.link)) return false; // PDF 直接内嵌阅读，无需抓正文
     return FeedParser.stripHtml(item.content || '').trim().length < 1200;
   }
 
@@ -795,7 +1150,7 @@
     if (!title || !root) return;
     const firstH = root.querySelector('h1, h2, h3');
     if (!firstH) return;
-    const hText = (firstH.innerText || '').trim();
+    const hText = (firstH.innerText || firstH.textContent || '').trim();
     if (!hText) return;
     const t = title.trim().toLowerCase(), h = hText.toLowerCase();
     if (t.includes(h) || h.includes(t) || similarity(t, h) > 0.65) firstH.remove();
@@ -808,14 +1163,181 @@
     return inter.size / Math.max(A.size, B.size);
   }
 
+  // 正文智能排版：去重图注、过滤推荐卡片、识别参考文献、清理空块与冗余换行
+  function smartArticleLayout(root) {
+    if (!root) return;
+    // 1) 相邻重复的 figcaption 只保留一个（源站常见重复图片说明）
+    let prevCaption = '';
+    Array.from(root.querySelectorAll('figcaption')).forEach(cap => {
+      const t = (cap.innerText || cap.textContent || '').trim();
+      if (t && t === prevCaption) { cap.remove(); return; }
+      prevCaption = t;
+    });
+    // 2) 与 hero 封面重复的首图移除，避免同一张图在弹窗里出现两次
+    const cover = (currentModalItem && currentModalItem.cover) || '';
+    if (cover) {
+      const firstImg = root.querySelector('img');
+      if (firstImg && (firstImg.getAttribute('src') || '') === cover) {
+        const fig = firstImg.closest('figure');
+        if (fig) fig.remove(); else firstImg.remove();
+      }
+    }
+    // 3) 孤立图片（不在 figure 内、且不在段落内）包成 figure，统一图注与间距
+    Array.from(root.querySelectorAll('img')).forEach(img => {
+      if (img.closest('figure')) return;
+      const parent = img.parentNode;
+      if (!parent || parent.tagName === 'P') return;
+      const fig = document.createElement('figure');
+      parent.insertBefore(fig, img);
+      fig.appendChild(img);
+    });
+    // 4) 移除推荐 / 相关阅读（"N min read"、Discover More、related-articles 等）
+    Array.from(root.querySelectorAll('div, section, article, li')).forEach(el => {
+      if (!el.isConnected) return;
+      const cls = (el.getAttribute('class') || '') + ' ' + (el.getAttribute('id') || '');
+      const text = (el.textContent || '').toLowerCase();
+      const isReco = /(discover[-_]?more|related[-_]?(articles?|stories?|content|topics)|recommend)/i.test(cls) ||
+                     /\d+\s*min\s*read/.test(text);
+      if (!isReco) return;
+      if (el.querySelectorAll('p').length > 6) return; // 排除正文大容器
+      el.remove();
+    });
+    // 5) 识别参考文献 / 引用资料区块，加统一样式（更小字号、次要色）
+    Array.from(root.querySelectorAll('h1, h2, h3, h4')).forEach(h => {
+      const t = (h.textContent || '').trim().toLowerCase();
+      if (/^(references?|sources?|resources?|further reading|参考|来源|引用)/.test(t)) {
+        h.classList.add('article-ref-title');
+        let sib = h.nextElementSibling;
+        while (sib && !/^H[1-6]$/.test(sib.tagName)) {
+          sib.classList.add('article-ref');
+          sib = sib.nextElementSibling;
+        }
+      }
+    });
+    // 5.5) 收集来源元信息（作者 / 详情 / 标签 / 分享），移到正文末尾的独立来源卡
+    const FOOTER_RE = /(about[-_]?author|author[-_]?bio|keep[-_]?exploring|related[-_]?terms|article[-_]?meta|source[-_]?meta|byline|\bdetails\b|\bcontact\b|\bshare\b|sharing|social)/i;
+    const footerNodes = [];
+    Array.from(root.querySelectorAll('div, section, aside, footer, dl, ul, p')).forEach(el => {
+      if (!el.isConnected) return;
+      const key = (el.getAttribute('class') || '') + ' ' + (el.getAttribute('id') || '');
+      if (!key.trim() || !FOOTER_RE.test(key)) return;
+      if (footerNodes.some(n => n.contains(el) || el.contains(n))) return;
+      if (el.querySelectorAll('p').length > 6) return; // 避免误收正文大容器
+      footerNodes.push(el);
+    });
+    if (footerNodes.length) {
+      const card = document.createElement('section');
+      card.className = 'article-source-card';
+      const title = document.createElement('h4');
+      title.className = 'asc-title';
+      title.textContent = '来源信息';
+      const body = document.createElement('div');
+      body.className = 'asc-body';
+      for (const n of footerNodes) { body.appendChild(n.cloneNode(true)); n.remove(); }
+      card.appendChild(title);
+      card.appendChild(body);
+      root.appendChild(card);
+    }
+    // 6) 清除只含空白 / &nbsp; / <br> 的段落与容器（消除大片空白）
+    Array.from(root.querySelectorAll('p, div, section, span')).forEach(el => {
+      if (!el.isConnected) return;
+      if (el.querySelector('img, figure, table, iframe, video, audio, a, button')) return;
+      const meaningful = (el.textContent || '').replace(/[\s\u00a0\u200b]+/g, '');
+      if (!meaningful) el.remove();
+    });
+    // 7) 合并连续 <br>，消除源站冗余换行造成的过大空白
+    Array.from(root.querySelectorAll('br')).forEach(br => {
+      if (!br.isConnected) return;
+      let next = br.nextSibling;
+      while (next && next.nodeType === 3 && !next.textContent.trim()) next = next.nextSibling;
+      while (next && next.nodeName === 'BR') { const n = next.nextSibling; next.remove(); next = n; }
+    });
+  }
+
+  // ---------- PDF 文档内嵌阅读 ----------
+  function isPdfLink(url) {
+    if (!url) return false;
+    try { return /\.pdf$/i.test(new URL(url).pathname); }
+    catch (_) { return /\.pdf(?:[?#]|$)/i.test(url); }
+  }
+  function renderPdfViewer(container, url) {
+    container.innerHTML = '';
+    container.classList.add('pdf-mode');
+    const wrap = document.createElement('div');
+    wrap.className = 'pdf-viewer-wrap';
+    const frame = document.createElement('iframe');
+    frame.className = 'pdf-frame';
+    frame.setAttribute('title', '在线文档');
+    const status = document.createElement('div');
+    status.className = 'pdf-tip';
+    status.textContent = '正在加载在线文档…';
+    let loaded = false;
+    frame.addEventListener('load', () => {
+      loaded = true;
+      status.textContent = '在线文档已加载。若上方显示空白，说明该站点禁止内嵌，可点「下载并内嵌」存到本地后直接阅读。';
+    });
+    setTimeout(() => {
+      if (!loaded) status.textContent = '在线加载较慢或被站点阻止；可点「下载并内嵌」把文件存到本地后直接阅读。';
+    }, 8000);
+
+    const actions = document.createElement('div');
+    actions.className = 'pdf-actions';
+    const openBtn = document.createElement('button');
+    openBtn.className = 'btn-secondary';
+    openBtn.textContent = '用浏览器打开';
+    openBtn.addEventListener('click', () => openLink(url));
+    const embedBtn = document.createElement('button');
+    embedBtn.className = 'btn-primary';
+    embedBtn.textContent = '下载并内嵌';
+    embedBtn.addEventListener('click', () => downloadAndEmbed(url, frame, status, embedBtn));
+    const sysBtn = document.createElement('button');
+    sysBtn.className = 'btn-secondary';
+    sysBtn.textContent = '下载到本地（系统打开）';
+    sysBtn.addEventListener('click', () => downloadPdf(url, sysBtn));
+
+    actions.appendChild(openBtn);
+    actions.appendChild(embedBtn);
+    actions.appendChild(sysBtn);
+    wrap.appendChild(frame);
+    wrap.appendChild(status);
+    wrap.appendChild(actions);
+    container.appendChild(wrap);
+    frame.src = url;
+  }
+  // 下载在线文档到本地后用 app-file:// 内嵌显示（解决站点禁止 iframe 内嵌的问题）
+  async function downloadAndEmbed(url, frame, statusEl, btn) {
+    if (!window.electronAPI || !window.electronAPI.downloadDocument) { showToast('仅桌面版支持'); return; }
+    if (btn) { btn.disabled = true; btn.textContent = '下载中…'; }
+    if (statusEl) statusEl.textContent = '正在下载文档到本地…';
+    const r = await window.electronAPI.downloadDocument(url);
+    if (btn) { btn.disabled = false; btn.textContent = '下载并内嵌'; }
+    if (r && r.ok) {
+      frame.src = r.url;
+      if (statusEl) statusEl.textContent = '已下载到本地（' + Math.round((r.size || 0) / 1024) + ' KB），正在以本地文件显示；可在「设置 → 缓存与后台」中清理。';
+    } else if (statusEl) {
+      statusEl.textContent = '下载失败：' + ((r && r.reason) || '未知错误');
+    }
+  }
+  async function downloadPdf(url, btn) {
+    if (!window.electronAPI || !window.electronAPI.downloadFile) { showToast('仅桌面版支持'); return; }
+    if (btn) { btn.disabled = true; btn.textContent = '下载中…'; }
+    const r = await window.electronAPI.downloadFile(url);
+    if (btn) { btn.disabled = false; btn.textContent = '下载到本地'; }
+    showToast(r && r.ok ? '已下载并用系统程序打开' : '下载失败：' + ((r && r.reason) || '未知错误'));
+  }
+
   function renderModalContent(html, isSummaryOnly, statusNote) {
     const contentEl = el('modal-content');
+    contentEl.classList.remove('pdf-mode');
+    const link = (currentModalItem && currentModalItem.link) || '';
+    if (isPdfLink(link)) { renderPdfViewer(contentEl, link); return; }
     if (html && html.trim()) {
       if (settings.smartClean !== false) {
         html = FeedParser.cleanArticleHtml(html, currentModalItem && currentModalItem.link, { aggressive: false });
       }
       contentEl.innerHTML = sanitizeHtml(html);
       removeDuplicateTitle(contentEl, el('modal-title').textContent);
+      smartArticleLayout(contentEl);
       if (isSummaryOnly) contentEl.innerHTML += '<p class="no-content">该信源仅提供摘要，正在尝试获取完整正文…</p>';
     } else {
       contentEl.innerHTML = '<p class="no-content">该信源未提供正文内容。</p>';
@@ -843,6 +1365,14 @@
     });
   }
 
+  // 需要「先渲染再抓取」的站点（JS 渲染或反爬 403）
+  function needsRenderedFetch(url) {
+    try {
+      const h = new URL(url).hostname.replace(/^www\./, '');
+      return /(^|\.)nytimes\.com$/.test(h) || /(^|\.)france24\.com$/.test(h);
+    } catch (_) { return false; }
+  }
+
   async function loadFullArticle(item) {
     const contentEl = el('modal-content');
     const loader = document.createElement('div'); loader.className = 'inline-loader'; loader.textContent = '正在获取完整正文…';
@@ -862,6 +1392,18 @@
       } else if (currentModalItem === item) {
         renderModalContent(item.content || item.summary, false);
       }
+      return true;
+    }
+
+    // 1) 需要渲染的站点：隐藏窗口加载 1.2~2.5s，等正文/图片出现后取 DOM
+    if (needsRenderedFetch(item.link) && window.electronAPI && window.electronAPI.fetchRendered) {
+      try {
+        const r = await window.electronAPI.fetchRendered(item.link, { waitMs: 2000 });
+        if (r && r.ok && r.html) {
+          const ok = await doExtract(r.html, '渲染页面为空');
+          if (ok) return;
+        }
+      } catch (_) { /* 继续走普通抓取 */ }
     }
 
     try {
@@ -871,10 +1413,21 @@
     } catch (e) {
       console.warn('[loadFullArticle] 直接抓取失败，尝试代理回退', item.link, e && e.message);
       try {
-        const proxyRes = await DataLayer.fetchText('https://api.allorigins.win/raw?url=' + encodeURIComponent(item.link));
+        const proxyBase = settings.proxyPrefix || 'https://api.allorigins.win/raw?url=';
+        const proxyRes = await DataLayer.fetchText(proxyBase + encodeURIComponent(item.link));
         const proxyHtml = (proxyRes && proxyRes.body != null) ? proxyRes.body : proxyRes;
         await doExtract(proxyHtml, '代理返回内容为空');
       } catch (pe) {
+        // 2) 动态渲染兜底（反爬 403 / JS 渲染站点）
+        let rendered = false;
+        try {
+          if (window.electronAPI && window.electronAPI.fetchRendered) {
+            const r = await window.electronAPI.fetchRendered(item.link, { waitMs: 2500 });
+            if (r && r.ok && r.html) rendered = await doExtract(r.html, '渲染页面为空');
+          }
+        } catch (_) { /* ignore */ }
+        if (rendered) return;
+        // 3) 最终回退到 RSS 内容
         if (currentModalItem === item) {
           const base = item.content || item.summary;
           const note = base ? '' : '该信源仅提供标题/摘要，无法获取完整正文，可点击「用浏览器打开原文」阅读。';
@@ -889,13 +1442,94 @@
   // ---------- 收藏 ----------
   async function toggleFavorite(item) {
     const k = favKey(item);
-    if (state.favorites.has(k)) state.favorites.delete(k);
+    const wasFav = state.favorites.has(k);
+    const snapshot = wasFav ? state.favorites.get(k) : null;
+    if (wasFav) state.favorites.delete(k);
     else state.favorites.set(k, JSON.parse(JSON.stringify(item)));
-    await Store.saveFavorites(Array.from(state.favorites.values()));
+    const ok = await Store.saveFavorites(Array.from(state.favorites.values()));
+    if (!ok) {
+      // 写入失败：回滚内存，避免"界面显示已收藏、重启后消失"
+      if (wasFav) state.favorites.set(k, snapshot);
+      else state.favorites.delete(k);
+      showToast('收藏保存失败，请检查数据目录是否可写');
+      return;
+    }
     const favBtn = el('modal-favorite');
-    favBtn.textContent = isFav(item) ? '★ 已收藏' : '☆ 收藏';
-    favBtn.classList.toggle('favorited', isFav(item));
+    if (favBtn) {
+      favBtn.textContent = isFav(item) ? '★ 已收藏' : '☆ 收藏';
+      favBtn.classList.toggle('favorited', isFav(item));
+    }
     renderNews();
+    if (state.page === 'favorites') renderFavorites();
+  }
+
+  // ---------- 收藏页 ----------
+  function renderFavorites() {
+    const grid = el('fav-grid');
+    const watchList = el('fav-watch-list');
+    const countEl = el('fav-count');
+    if (!grid) return;
+    const tab = state.favTab || 'news';
+    const tabs = el('fav-tabs');
+    if (tabs) tabs.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', b.dataset.favtab === tab));
+    grid.classList.toggle('hidden', tab !== 'news');
+    if (watchList) watchList.classList.toggle('hidden', tab !== 'watch');
+    const clearBtn = el('clear-favs-btn');
+    if (clearBtn) clearBtn.classList.toggle('hidden', tab !== 'news');
+
+    if (tab === 'watch') {
+      const ids = settings.watchedSources || [];
+      if (countEl) countEl.textContent = ids.length + ' 个';
+      if (!watchList) return;
+      watchList.innerHTML = '';
+      if (!ids.length) {
+        watchList.innerHTML = '<div class="placeholder">还没有重点关注发布者。到「发布者」页点卡片右上角 ☆ 即可添加。</div>';
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      for (const id of ids) {
+        const s = SOURCES.NEWS_SOURCES.find(x => x.id === id);
+        if (!s) continue;
+        const p = s.profile || {};
+        const card = document.createElement('div');
+        card.className = 'source-card watched-mark';
+        card.innerHTML =
+          '<button class="src-watch-btn active" title="取消重点关注">★</button>' +
+          '<div class="source-logo"><span class="logo-ph">' + (s.name.charAt(0) || '📰') + '</span></div>' +
+          '<div class="source-body">' +
+            '<h3 class="source-name">' + esc(s.name) + '</h3>' +
+            '<div class="source-tags">' +
+              '<span class="badge ' + s.grade + '">' + s.grade + '</span>' +
+              '<span class="source-tag">' + (REGION_NAMES[s.region] || s.region || '') + '</span>' +
+              (isSourcePaid(s.id) ? '<span class="tag-chip src-cat">付费</span>' : '') +
+            '</div>' +
+            '<p class="source-bg">' + esc(p.background || '') + '</p>' +
+          '</div>';
+        card.querySelector('.src-watch-btn').addEventListener('click', (e) => { e.stopPropagation(); toggleWatchedSource(s.id); });
+        card.addEventListener('click', () => openLink(sourceWebsite(s)));
+        frag.appendChild(card);
+      }
+      watchList.appendChild(frag);
+      return;
+    }
+
+    const list = Array.from(state.favorites.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    if (countEl) countEl.textContent = list.length + ' 条';
+    if (list.length === 0) {
+      grid.innerHTML = '<div class="placeholder">还没有收藏。打开任意新闻，点击「☆ 收藏」即可在此集中查看。</div>';
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const it of list) frag.appendChild(buildCard(it, false));
+    grid.innerHTML = '';
+    grid.appendChild(frag);
+  }
+  async function clearFavorites() {
+    state.favorites.clear();
+    await Store.saveFavorites([]);
+    renderFavorites();
+    renderNews();
+    showToast('已清空全部收藏');
   }
 
   // ---------- 日历（含每日新闻量标签 + 水位波浪 + 清除筛选） ----------
@@ -1068,6 +1702,26 @@
     const res = await Store.mergeAndPersist(result.news);
     await Store.recordWindowSaturation(res.added7); // 更新近 7 天饱和状态（决定是否自动扩展到 30 天）
     state.news = res.merged;
+    // 订阅提醒：新增新闻命中关键词时发系统通知
+    const watch = (settings.watchlist || []).map(w => String(w).trim().toLowerCase()).filter(Boolean);
+    if (watch.length && window.electronAPI && window.electronAPI.notify) {
+      const addedSet = new Set(res.addedKeys || []);
+      for (const it of res.merged) {
+        if (!addedSet.has(Store.dedupeKey(it))) continue;
+        const title = (it.title || '').toLowerCase();
+        for (const w of watch) {
+          if (title.includes(w)) {
+            window.electronAPI.notify('订阅提醒', (it.title || '') + '（' + (it.source || '') + '）');
+            break;
+          }
+        }
+      }
+    }
+    // 自动规则动作（已读/收藏），仅对本次新增项应用
+    if (res.addedKeys && res.addedKeys.length && (settings.rules || []).length) {
+      const addedSet = new Set(res.addedKeys);
+      applyRulesToItems(res.merged.filter(it => addedSet.has(Store.dedupeKey(it))));
+    }
     renderNews({ animate: true }); renderCalendar(); renderVizIfVisible();
   }
 
@@ -1159,21 +1813,27 @@
     const palette = ['#0a84ff', '#30d158', '#ff9f0a', '#ff453a', '#bf5af2', '#64d2ff', '#ffd60a'];
     function draw(id, type, labels, data, label) {
       const cv = el(id); if (!cv) return;
-      if (charts[id]) charts[id].destroy();
+      const opts = {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: type !== 'bar', labels: { color: '#a1a1a6' } } },
+        scales: {
+          x: { ticks: { color: '#a1a1a6', maxTicksLimit: 10 }, grid: { color: 'rgba(255,255,255,0.06)' } },
+          y: { ticks: { color: '#a1a1a6' }, grid: { color: 'rgba(255,255,255,0.06)' }, beginAtZero: true }
+        }
+      };
+      // 复用已有实例，仅 update，避免 destroy 重建导致的闪烁
+      const existing = charts[id];
+      if (existing && existing.config && existing.config.type === type) {
+        existing.data.labels = labels;
+        existing.data.datasets[0] = { label, data, backgroundColor: palette, borderColor: palette, borderWidth: 1 };
+        existing.update();
+        return;
+      }
+      if (existing) existing.destroy();
       charts[id] = new Chart(cv.getContext('2d'), {
         type,
         data: { labels, datasets: [{ label, data, backgroundColor: palette, borderColor: palette, borderWidth: 1 }] },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: type !== 'bar', labels: { color: '#a1a1a6' } } },
-          scales: type === 'line' ? {
-            x: { ticks: { color: '#a1a1a6', maxTicksLimit: 10 }, grid: { color: 'rgba(255,255,255,0.06)' } },
-            y: { ticks: { color: '#a1a1a6' }, grid: { color: 'rgba(255,255,255,0.06)' }, beginAtZero: true }
-          } : {
-            x: { ticks: { color: '#a1a1a6' }, grid: { color: 'rgba(255,255,255,0.06)' } },
-            y: { ticks: { color: '#a1a1a6' }, grid: { color: 'rgba(255,255,255,0.06)' }, beginAtZero: true }
-          }
-        }
+        options: opts
       });
     }
     draw('chart-category', 'doughnut', Object.keys(catCount), Object.values(catCount), '领域');
@@ -1186,6 +1846,60 @@
   }
 
   // ---------- 设置 ----------
+  function applyFontSize() {
+    const map = { s: '15px', m: '17px', l: '20px' };
+    document.documentElement.style.setProperty('--article-font-size', map[settings.fontSize] || map.m);
+  }
+  function watchlistToString() {
+    return (settings.watchlist || []).join('、');
+  }
+  function watchlistFromString(s) {
+    return String(s || '').split(/[、,，\n]+/).map(x => x.trim()).filter(Boolean);
+  }
+  function renderRules() {
+    const box = el('rules-list');
+    if (!box) return;
+    box.innerHTML = '';
+    const rules = settings.rules || [];
+    if (!rules.length) { box.innerHTML = '<p class="set-hint">暂无规则，添加后自动生效。</p>'; return; }
+    const frag = document.createDocumentFragment();
+    rules.forEach((r, i) => {
+      const row = document.createElement('div');
+      row.className = 'rule-row';
+      row.innerHTML =
+        '<code class="rule-pattern">' + esc(r.pattern) + '</code>' +
+        '<span class="rule-meta">' + (RULE_FIELDS[r.field] || '标题') + ' → ' + (RULE_ACTIONS[r.action] || '已读') + '</span>' +
+        '<label class="ios-toggle sm"><input type="checkbox" class="rule-enable" ' + (r.enabled !== false ? 'checked' : '') + ' /><span class="toggle-track"></span></label>' +
+        '<button class="rule-del">删除</button>';
+      row.querySelector('.rule-enable').addEventListener('change', (e) => {
+        rules[i].enabled = e.target.checked;
+        Store.saveSettings(settings);
+        renderNews({ animate: false });
+      });
+      row.querySelector('.rule-del').addEventListener('click', () => {
+        rules.splice(i, 1);
+        Store.saveSettings(settings);
+        renderRules();
+        renderNews({ animate: false });
+      });
+      frag.appendChild(row);
+    });
+    box.appendChild(frag);
+  }
+  function renderTagChips() {
+    const box = el('tag-tabs');
+    if (!box) return;
+    box.querySelectorAll('.chip[data-tag-dynamic]').forEach(c => c.remove());
+    for (const t of allTags()) {
+      const b = document.createElement('button');
+      b.className = 'chip' + (state.filters.tag === t ? ' active' : '');
+      b.dataset.tag = t;
+      b.dataset.tagDynamic = '1';
+      b.textContent = t;
+      box.appendChild(b);
+    }
+  }
+
   function renderSettings() {
     el('set-auto-refresh').checked = !!settings.autoRefresh;
     el('set-auto-start').checked = !!settings.autoRefreshOnStart;
@@ -1206,6 +1920,19 @@
     el('set-geo-key').value = settings.geo.apiKey || '';
     el('set-geo-style').value = settings.geo.mapStyleId || '';
     el('set-datadir').value = settings.dataDir || '';
+    el('set-font-size').value = settings.fontSize || 'm';
+    el('set-proxy-prefix').value = settings.proxyPrefix || '';
+    el('set-watchlist').value = watchlistToString();
+    el('set-llm-enabled').checked = !!(settings.llm && settings.llm.enabled);
+    el('set-llm-provider').value = (settings.llm && settings.llm.provider) || 'openai';
+    el('set-llm-key').value = (settings.llm && settings.llm.apiKey) || '';
+    el('set-llm-base').value = (settings.llm && settings.llm.baseUrl) || '';
+    el('set-llm-model').value = (settings.llm && settings.llm.model) || '';
+    el('set-llm-brief-auto').checked = !!(settings.llm && settings.llm.briefAuto);
+    el('set-tts-provider').value = (settings.tts && settings.tts.provider) || 'system';
+    el('set-tts-voice').value = (settings.tts && settings.tts.voice) || 'zh-CN';
+    el('set-fever-enabled').checked = !!(settings.fever && settings.fever.enabled);
+    el('set-rsshub-base').value = (settings.rsshub && settings.rsshub.base) || 'https://rsshub.app';
     const lt = el('update-line-toggle');
     if (lt) lt.classList.toggle('is-secondary', settings.updateLine === 'gitee');
     if (window.electronAPI && window.electronAPI.appPaths) {
@@ -1219,7 +1946,16 @@
 
     // 信源管理列表（新 UI：logo + 名称 + 标签 + 开关）
     renderSourceSettings();
+    renderRules();
     refreshCacheStats();
+    // 已下载文档统计（纳入缓存清理范围）
+    Store.downloadsInfo().then(info => {
+      const box = el('downloads-stats');
+      if (!box) return;
+      const bytes = info.bytes || 0;
+      const sizeText = bytes >= 1024 * 1024 ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB';
+      box.textContent = (info.count || 0) + ' 个文件 · ' + sizeText;
+    });
   }
 
   // 生成单个信源设置行（logo + 名称 + 标签 + iOS 风格开关）
@@ -1303,6 +2039,17 @@
     track.className = 'toggle-track';
     toggle.appendChild(cb);
     toggle.appendChild(track);
+    // 信源健康度状态点（绿=最近成功 / 黄=偶发失败 / 红=连续失败 / 灰=未抓取）
+    const health = state.sourceHealth[s.id];
+    const dot = document.createElement('span');
+    dot.className = 'health-dot' + (health ? (health.ok ? ' ok' : (health.consecutiveFails >= 3 ? ' bad' : ' warn')) : ' none');
+    dot.title = health
+      ? ((health.ok ? '最近成功' : '连续失败 ' + health.consecutiveFails + ' 次') +
+         (health.error ? '：' + health.error : '') +
+         (health.lastTry ? ' · 上次尝试 ' + new Date(health.lastTry).toLocaleString('zh-CN', { hour12: false }) : ''))
+      : '尚未抓取过';
+    row.appendChild(dot);
+
     row.appendChild(toggle);
 
     return row;
@@ -1369,6 +2116,23 @@
     settings.geo.apiKey = el('set-geo-key').value.trim();
     settings.geo.mapStyleId = el('set-geo-style').value.trim();
     settings.dataDir = el('set-datadir').value.trim();
+    settings.fontSize = el('set-font-size').value || 'm';
+    settings.proxyPrefix = el('set-proxy-prefix').value.trim();
+    settings.watchlist = watchlistFromString(el('set-watchlist').value);
+    settings.llm = settings.llm || {};
+    settings.llm.enabled = el('set-llm-enabled').checked;
+    settings.llm.provider = el('set-llm-provider').value;
+    settings.llm.apiKey = el('set-llm-key').value.trim();
+    settings.llm.baseUrl = el('set-llm-base').value.trim();
+    settings.llm.model = el('set-llm-model').value.trim();
+    settings.llm.briefAuto = el('set-llm-brief-auto').checked;
+    settings.tts = settings.tts || {};
+    settings.tts.provider = el('set-tts-provider').value;
+    settings.tts.voice = el('set-tts-voice').value.trim();
+    settings.fever = settings.fever || {};
+    settings.fever.enabled = el('set-fever-enabled').checked;
+    settings.rsshub = settings.rsshub || {};
+    settings.rsshub.base = el('set-rsshub-base').value.trim();
     settings.updateLine = (el('update-line-toggle') && el('update-line-toggle').classList.contains('is-secondary')) ? 'gitee' : 'github';
     settings.sources = {};
     el('settings-sources').querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -1390,16 +2154,269 @@
   // 每次改动即时落盘 + 必要副作用 + 提示
   async function persistSettings(note) {
     collectSettings();
-    await Store.saveSettings(settings);
+    const saved = await Store.saveSettings(settings);
     Store.setSettings(settings); // 同步窗口配置给数据层
     if (window.electronAPI && window.electronAPI.setBackgroundRefresh) {
       window.electronAPI.setBackgroundRefresh(settings.backgroundRefresh !== false);
     }
     syncAutoRefreshFromSettings();
+    applyFontSize();
     if (window.DataLayer && DataLayer.MODES) {
-      DataLayer.configure(DataLayer.MODES[settings.fetchMode] || DataLayer.MODES.balanced);
+      const mode = DataLayer.MODES[settings.fetchMode] || DataLayer.MODES.balanced;
+      DataLayer.configure(Object.assign({}, mode, { proxyPrefix: settings.proxyPrefix || '' }));
     }
+    if (!saved) { showToast('设置保存失败，请检查数据目录是否可写'); return; }
     showToast(note || '已保存');
+  }
+
+  // ---------- 导出与批量已读 ----------
+  function exportNews() {
+    const list = state.news.filter(it => matchFilters(it) && !isHiddenEffective(it));
+    if (!list.length) { showToast('没有可导出的新闻'); return; }
+    const lines = ['# 新闻导出', '', '导出时间：' + new Date().toLocaleString('zh-CN', { hour12: false }), '数量：' + list.length + ' 条', ''];
+    for (const it of list) {
+      const src = it.source || '';
+      const grade = it.grade || '';
+      const cats = (it.categories || []).map(c => CATEGORY_NAMES[c] || c).join('、');
+      const time = it.dateText || '';
+      lines.push('## ' + (it.title || '无标题'));
+      lines.push('');
+      lines.push('- 来源：' + src + (grade ? '（' + grade + '）' : ''));
+      if (cats) lines.push('- 分类：' + cats);
+      if (time) lines.push('- 时间：' + time);
+      if (it.link) lines.push('- 链接：' + it.link);
+      const summary = FeedParser.stripHtml(it.summary || '').trim();
+      if (summary) lines.push('', summary);
+      lines.push('', '---', '');
+    }
+    const md = lines.join('\n');
+    if (window.electronAPI && window.electronAPI.storage) {
+      const ts = new Date();
+      const p = (d) => String(d).padStart(2, '0');
+      const fname = 'exports/news_' + ts.getFullYear() + '-' + p(ts.getMonth() + 1) + '-' + p(ts.getDate()) + '_' + p(ts.getHours()) + p(ts.getMinutes()) + p(ts.getSeconds()) + '.md';
+      window.electronAPI.storage.write(fname, md).then(ok => {
+        showToast(ok ? '已导出到 data/' + fname : '导出失败');
+      });
+    } else {
+      const blob = new Blob([md], { type: 'text/markdown' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'news_export.md';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      showToast('已导出');
+    }
+  }
+  function markAllRead() {
+    const list = state.news.filter(it => matchFilters(it) && !isHiddenEffective(it));
+    if (!list.length) { showToast('当前没有新闻'); return; }
+    for (const it of list) {
+      state.readKeys.set(favKey(it), Date.now());
+      state.sessionRead.add(Store.dedupeKey(it));
+    }
+    Store.saveReadState(state.readKeys);
+    renderNews();
+    showToast('已标记 ' + list.length + ' 条为已读');
+  }
+  // ---------- OPML 导入导出 + 备份恢复 ----------
+  function escXml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  }
+  function exportOpml() {
+    const lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<opml version="2.0">', '<head><title>实时新闻中心信源</title></head>', '<body>'];
+    for (const s of SOURCES.NEWS_SOURCES) {
+      const title = escXml(s.name || s.id);
+      const url = escXml(s.url || '');
+      const grade = s.grade || '';
+      const region = REGION_NAMES[s.region] || s.region || '';
+      const cats = (s.categories || []).map(c => CATEGORY_NAMES[c] || c).join(',');
+      const catAttr = escXml([region, grade, cats].filter(Boolean).join(' / '));
+      lines.push('  <outline type="rss" text="' + title + '" title="' + title + '" xmlUrl="' + url + '" category="' + catAttr + '"/>');
+    }
+    lines.push('</body></opml>');
+    const xml = lines.join('\n');
+    if (window.electronAPI && window.electronAPI.storage) {
+      window.electronAPI.storage.write('exports/sources.opml', xml).then(ok => showToast(ok ? '已导出到 data/exports/sources.opml' : '导出失败'));
+    } else {
+      const blob = new Blob([xml], { type: 'text/xml' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'sources.opml'; a.click(); URL.revokeObjectURL(a.href);
+      showToast('已导出');
+    }
+  }
+  async function importOpml() {
+    if (!window.electronAPI || !window.electronAPI.pickOpml) { showToast('仅桌面版支持导入'); return; }
+    const res = await window.electronAPI.pickOpml();
+    if (!res || !res.content) return;
+    const doc = new DOMParser().parseFromString(res.content, 'text/xml');
+    const outlines = doc.querySelectorAll('outline[xmlUrl]');
+    const addedSrcs = [];
+    for (const o of outlines) {
+      const name = (o.getAttribute('title') || o.getAttribute('text') || '').trim();
+      const url = (o.getAttribute('xmlUrl') || '').trim();
+      if (!name || !url) continue;
+      if (SOURCES.NEWS_SOURCES.some(s => s.url === url)) continue;
+      const id = 'user-' + Date.now().toString(36) + '-' + addedSrcs.length;
+      const src = { id, name, grade: 'P2', region: 'intl', categories: ['politics'], lang: '', url, profile: { fullName: name, country: '', background: '从 OPML 导入的信源。' } };
+      addedSrcs.push(src);
+      userSources.push(src);
+      userSourceIds.add(id);
+    }
+    if (addedSrcs.length) {
+      await Store.saveUserSources(userSources);
+      SOURCES.NEWS_SOURCES = SOURCES.NEWS_SOURCES.concat(addedSrcs);
+      renderSources(); renderSourceFilterChips();
+      showToast('已导入 ' + addedSrcs.length + ' 个信源');
+    } else {
+      showToast('未发现新信源（可能已存在或文件为空）');
+    }
+  }
+  async function doBackup() {
+    if (!window.electronAPI || !window.electronAPI.backupData) { showToast('仅桌面版支持'); return; }
+    const r = await window.electronAPI.backupData();
+    showToast(r && r.ok ? '备份完成：' + (r.name || '') : '备份失败：' + ((r && r.reason) || '未知错误'));
+  }
+  async function doRestore() {
+    if (!window.electronAPI || !window.electronAPI.listBackups) { showToast('仅桌面版支持'); return; }
+    const list = await window.electronAPI.listBackups();
+    if (!list.length) { showToast('暂无可用备份'); return; }
+    const name = prompt('选择要恢复的备份（输入完整名称）：\n\n' + list.join('\n'));
+    if (!name) return;
+    if (confirm('恢复将把当前数据覆盖为备份「' + name + '」，确定？')) {
+      const r = await window.electronAPI.restoreData(name);
+      showToast(r && r.ok ? '已恢复，重启后生效' : '恢复失败：' + ((r && r.reason) || '未知错误'));
+    }
+  }
+  // ---------- 可选 LLM（翻译 / 简报） ----------
+  async function callLLM(messages, opts) {
+    opts = opts || {};
+    if (!window.electronAPI || !window.electronAPI.llmChat) return { ok: false, reason: '仅桌面版支持' };
+    const llm = settings.llm || {};
+    return await window.electronAPI.llmChat({
+      provider: opts.provider || llm.provider,
+      apiKey: llm.apiKey,
+      baseUrl: llm.baseUrl,
+      model: llm.model,
+      messages
+    });
+  }
+  function renderMarkdown(text) {
+    if (!text) return '';
+    return String(text)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/^### (.*)$/gm, '<h3>$1</h3>')
+      .replace(/^## (.*)$/gm, '<h2>$1</h2>')
+      .replace(/^# (.*)$/gm, '<h1>$1</h1>')
+      .replace(/^[-*] (.*)$/gm, '<li>$1</li>')
+      .replace(/\n/g, '<br>');
+  }
+  function showBriefModal(title, text) {
+    el('brief-title').textContent = title || '结果';
+    el('brief-content').innerHTML = renderMarkdown(text || '');
+    el('brief-modal').classList.remove('hidden');
+  }
+  function closeBriefModal() { el('brief-modal').classList.add('hidden'); }
+  async function translateCurrentArticle() {
+    if (!currentModalItem) return;
+    const llm = settings.llm || {};
+    if (!llm.enabled) { showToast('请先在「设置 → 智能助手」启用 LLM'); return; }
+    const title = currentModalItem.title || '';
+    const summary = FeedParser.stripHtml(currentModalItem.summary || '').trim();
+    const btn = el('modal-translate');
+    if (btn) { btn.disabled = true; btn.textContent = '翻译中…'; }
+    const res = await callLLM([{ role: 'user', content: '请把下面的新闻标题和摘要翻译成中文（若已是中文则润色），只输出结果：\n\n标题：' + title + '\n摘要：' + summary }]);
+    if (btn) { btn.disabled = false; btn.textContent = '翻译'; }
+    if (res && res.ok) showBriefModal('翻译结果', res.text);
+    else showToast('翻译失败：' + ((res && res.reason) || '未知错误'));
+  }
+  async function generateBrief() {
+    const llm = settings.llm || {};
+    if (!llm.enabled) { showToast('请先在「设置 → 智能助手」启用 LLM'); return; }
+    const cutoff = Date.now() - 24 * 3600 * 1000;
+    const recent = state.news.filter(it => (it.timestamp || 0) >= cutoff).slice(0, 50);
+    if (!recent.length) { showToast('暂无最近 24 小时新闻'); return; }
+    const titles = recent.map(it => '- [' + (it.source || '') + '] ' + (it.title || '')).join('\n');
+    showToast('正在生成简报，请稍候…');
+    const res = await callLLM([{ role: 'user', content: '以下是最近 24 小时的重要新闻标题，请生成一份简洁的每日简报：分 3~5 个主题板块，每板块 2~3 句概括要点，最后用「今日要闻」列出最重要的 3 条。用 Markdown 输出。\n\n' + titles }]);
+    if (res && res.ok) showBriefModal('每日简报', res.text);
+    else showToast('简报生成失败：' + ((res && res.reason) || '未知错误'));
+  }
+  // ---------- 朗读（TTS：系统 / 云端） ----------
+  function speak(text) {
+    if (!text) return;
+    const tts = settings.tts || {};
+    if (tts.provider === 'cloud') {
+      const llm = settings.llm || {};
+      if (!window.electronAPI || !window.electronAPI.ttsCloud) { showToast('仅桌面版支持'); return; }
+      window.electronAPI.ttsCloud({ apiKey: llm.apiKey, baseUrl: llm.baseUrl, model: 'tts-1', voice: tts.voice || 'alloy', text }).then(r => {
+        if (r && r.ok) { new Audio('data:audio/mp3;base64,' + r.audio).play(); }
+        else showToast('朗读失败：' + ((r && r.reason) || '未知错误'));
+      });
+    } else {
+      try {
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = tts.voice || 'zh-CN';
+        speechSynthesis.speak(u);
+      } catch (e) { showToast('朗读失败'); }
+    }
+  }
+  function speakCurrentArticle() {
+    if (!currentModalItem) return;
+    const text = (currentModalItem.title || '') + '。' + FeedParser.stripHtml(currentModalItem.content || currentModalItem.summary || '').trim();
+    speak(text.slice(0, 3000));
+  }
+  function stopSpeak() { try { speechSynthesis.cancel(); } catch (_) {} }
+  function toggleImmersive() {
+    const modal = el('article-modal');
+    if (!modal) return;
+    const on = modal.classList.toggle('immersive');
+    showToast(on ? '沉浸阅读已开启' : '已退出沉浸阅读');
+  }
+  // 底部工具栏：常驻 / 收起为悬浮按钮
+  function applyFooterMode(mode) {
+    const footer = el('modal-footer');
+    const fab = el('modal-footer-fab');
+    if (!footer || !fab) return;
+    const collapsed = mode === 'collapsed';
+    footer.classList.toggle('collapsed', collapsed);
+    fab.classList.toggle('hidden', !collapsed);
+  }
+  function setFooterMode(mode) {
+    settings.modalFooter = mode;
+    Store.saveSettings(settings);
+    applyFooterMode(mode);
+    showToast(mode === 'collapsed' ? '工具栏已收起，点击右下角按钮可展开' : '工具栏已常驻');
+  }
+  function moveFocus(dir) {
+    const cards = document.querySelectorAll('#news-grid .card[data-key]');
+    if (!cards.length) return;
+    if (state.focusIndex == null) state.focusIndex = -1;
+    state.focusIndex += dir;
+    if (state.focusIndex < 0) state.focusIndex = 0;
+    if (state.focusIndex >= cards.length) state.focusIndex = cards.length - 1;
+    cards.forEach(c => c.classList.remove('focused'));
+    const c = cards[state.focusIndex];
+    c.classList.add('focused');
+    c.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+  function isTypingTarget(e) {
+    const t = e.target;
+    if (!t) return false;
+    const tag = (t.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || t.isContentEditable;
+  }
+  function handleShortcut(e) {
+    if (e.key === 'Escape') { closeArticleModal(); closeHotModal(); return; }
+    if (isTypingTarget(e)) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 'r') { refresh('all'); return; }
+    if (k === 'f' && currentModalItem) { toggleFavorite(currentModalItem); return; }
+    if (k === 'j' || k === 'k') { moveFocus(k === 'j' ? 1 : -1); return; }
+    if (k === '?') { showToast('快捷键：R 刷新 · J/K 切换 · F 收藏 · Esc 关闭'); return; }
   }
 
   // ---------- 绑定 ----------
@@ -1409,6 +2426,13 @@
     el('region-tabs').addEventListener('click', (e) => { if (!e.target.dataset.region) return; setActive('region-tabs', e.target); state.filters.region = e.target.dataset.region; resetAndRenderNews(); });
     el('category-tabs').addEventListener('click', (e) => { if (!e.target.dataset.category) return; setActive('category-tabs', e.target); state.filters.category = e.target.dataset.category; resetAndRenderNews(); });
     el('grade-tabs').addEventListener('click', (e) => { if (!e.target.dataset.grade) return; setActive('grade-tabs', e.target); state.filters.grade = e.target.dataset.grade; resetAndRenderNews(); });
+    el('tag-tabs').addEventListener('click', (e) => {
+      const chip = e.target.closest('.chip');
+      if (!chip) return;
+      state.filters.tag = chip.dataset.tag || '';
+      el('tag-tabs').querySelectorAll('.chip').forEach(c => c.classList.toggle('active', c === chip));
+      resetAndRenderNews();
+    });
     el('search-input').addEventListener('input', (e) => { state.filters.search = e.target.value; resetAndRenderNews(); });
     el('date-from').addEventListener('change', (e) => { state.filters.dateFrom = e.target.value; state.calendarDate = null; renderCalendar(); resetAndRenderNews(); });
     el('date-to').addEventListener('change', (e) => { state.filters.dateTo = e.target.value; state.calendarDate = null; renderCalendar(); resetAndRenderNews(); });
@@ -1441,6 +2465,45 @@
     el('refresh-hot-btn').addEventListener('click', () => refresh('hot'));
     el('refresh-all-btn').addEventListener('click', () => refresh('all'));
 
+    // 导出 / 批量已读 / 清空收藏
+    const exportBtn = el('export-news-btn');
+    if (exportBtn) exportBtn.addEventListener('click', exportNews);
+    // 置顶开关（收藏 / 重点关注）
+    const pinFavBtn = el('pin-fav-btn');
+    const pinWatchBtn = el('pin-watch-btn');
+    function syncPinBtns() {
+      if (pinFavBtn) pinFavBtn.classList.toggle('active', settings.pinFavorites !== false);
+      if (pinWatchBtn) pinWatchBtn.classList.toggle('active', settings.pinWatched !== false);
+    }
+    if (pinFavBtn) pinFavBtn.addEventListener('click', () => {
+      settings.pinFavorites = settings.pinFavorites === false;
+      Store.saveSettings(settings);
+      syncPinBtns();
+      renderNews({ animate: false });
+    });
+    if (pinWatchBtn) pinWatchBtn.addEventListener('click', () => {
+      settings.pinWatched = settings.pinWatched === false;
+      Store.saveSettings(settings);
+      syncPinBtns();
+      renderNews({ animate: false });
+    });
+    syncPinBtns();
+    // 收藏页子页切换（新闻收藏 / 重点关注发布者）
+    const favTabs = el('fav-tabs');
+    if (favTabs) favTabs.addEventListener('click', (e) => {
+      const b = e.target.closest('.seg-btn');
+      if (!b) return;
+      state.favTab = b.dataset.favtab || 'news';
+      renderFavorites();
+    });
+    const markAllReadBtn = el('mark-all-read-btn');
+    if (markAllReadBtn) markAllReadBtn.addEventListener('click', markAllRead);
+    const clearFavsBtn = el('clear-favs-btn');
+    if (clearFavsBtn) clearFavsBtn.addEventListener('click', () => {
+      if (state.favorites.size === 0) { showToast('暂无收藏'); return; }
+      if (confirm('确定清空全部收藏？此操作不可撤销。')) clearFavorites();
+    });
+
     // 弹窗
     el('modal-close').addEventListener('click', closeArticleModal);
     el('modal-close-btn').addEventListener('click', closeArticleModal);
@@ -1460,7 +2523,7 @@
         h.classList.remove('scrolled');
       }
     });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeArticleModal(); closeHotModal(); } });
+    document.addEventListener('keydown', handleShortcut);
 
     // 热搜弹窗
     el('hot-close').addEventListener('click', closeHotModal);
@@ -1520,6 +2583,56 @@
     bindAutoSave('set-geo-key', '地图 Key 已保存');
     bindAutoSave('set-geo-style', '地图样式已保存');
     bindAutoSave('set-datadir', '数据目录已保存');
+    bindAutoSave('set-font-size', '字号已保存');
+    bindAutoSave('set-proxy-prefix', '代理前缀已保存');
+    bindAutoSave('set-watchlist', '订阅关键词已保存');
+    // 自动规则：添加规则
+    const ruleAddBtn = el('rule-add');
+    if (ruleAddBtn) ruleAddBtn.addEventListener('click', () => {
+      const pattern = (el('rule-pattern').value || '').trim();
+      if (!pattern) { showToast('请输入匹配规则'); return; }
+      const field = el('rule-field').value;
+      const action = el('rule-action').value;
+      settings.rules = settings.rules || [];
+      settings.rules.push({ id: 'r' + Date.now().toString(36), pattern, field, action, enabled: true });
+      Store.saveSettings(settings);
+      el('rule-pattern').value = '';
+      renderRules();
+      renderNews({ animate: false });
+    });
+    // LLM / TTS / RSSHub 设置自动保存
+    bindAutoSave('set-llm-enabled', '智能助手已保存');
+    bindAutoSave('set-llm-provider', '智能助手已保存');
+    bindAutoSave('set-llm-key', '智能助手已保存');
+    bindAutoSave('set-llm-base', '智能助手已保存');
+    bindAutoSave('set-llm-model', '智能助手已保存');
+    bindAutoSave('set-llm-brief-auto', '简报设置已保存');
+    bindAutoSave('set-tts-provider', '语音设置已保存');
+    bindAutoSave('set-tts-voice', '语音设置已保存');
+    bindAutoSave('set-rsshub-base', 'RSSHub 设置已保存');
+    el('set-fever-enabled').addEventListener('change', () => {
+      persistSettings('Fever 设置已保存');
+      if (window.electronAPI && window.electronAPI.restartFeverServer) window.electronAPI.restartFeverServer();
+    });
+    // 简报 / 翻译 / 朗读 / 沉浸阅读
+    const briefBtn = el('brief-btn');
+    if (briefBtn) briefBtn.addEventListener('click', generateBrief);
+    const transBtn = el('modal-translate');
+    if (transBtn) transBtn.addEventListener('click', translateCurrentArticle);
+    const speakBtn = el('modal-speak');
+    if (speakBtn) speakBtn.addEventListener('click', speakCurrentArticle);
+    const stopSpeakBtn = el('modal-stop-speak');
+    if (stopSpeakBtn) stopSpeakBtn.addEventListener('click', stopSpeak);
+    const immersiveBtn = el('modal-immersive');
+    if (immersiveBtn) immersiveBtn.addEventListener('click', toggleImmersive);
+    const footerToggle = el('modal-footer-toggle');
+    if (footerToggle) footerToggle.addEventListener('click', () => setFooterMode('collapsed'));
+    const footerFab = el('modal-footer-fab');
+    if (footerFab) footerFab.addEventListener('click', () => setFooterMode('docked'));
+    const briefClose = el('brief-close');
+    if (briefClose) briefClose.addEventListener('click', closeBriefModal);
+    const briefBackdrop = el('brief-backdrop');
+    if (briefBackdrop) briefBackdrop.addEventListener('click', closeBriefModal);
     // 更新线路：首选(GitHub) / 备用(Gitee) 分段开关
     const lineToggle = el('update-line-toggle');
     if (lineToggle) {
@@ -1598,6 +2711,21 @@
       await Store.clearAllCache();
       el('clear-result').textContent = '已清空全部缓存 ✓';
       state.news = [];
+    });
+    el('opml-export-btn').addEventListener('click', exportOpml);
+    el('opml-import-btn').addEventListener('click', importOpml);
+    el('backup-btn').addEventListener('click', doBackup);
+    el('restore-btn').addEventListener('click', doRestore);
+    const clearDownloadsBtn = el('clear-downloads-btn');
+    if (clearDownloadsBtn) clearDownloadsBtn.addEventListener('click', async () => {
+      const r = await Store.clearDownloads();
+      if (r && r.ok) {
+        showToast('已清理 ' + (r.count || 0) + ' 个下载文档');
+        const box = el('downloads-stats');
+        if (box) box.textContent = '0 个文件 · 0 KB';
+      } else {
+        showToast('清理失败');
+      }
     });
   }
 
@@ -1703,8 +2831,10 @@
     Store.setSettings(settings); // 同步窗口配置给数据层
     // 应用新闻获取模式（并发数 + 条件请求）到数据层
     if (window.DataLayer && DataLayer.MODES) {
-      DataLayer.configure(DataLayer.MODES[settings.fetchMode] || DataLayer.MODES.balanced);
+      const mode = DataLayer.MODES[settings.fetchMode] || DataLayer.MODES.balanced;
+      DataLayer.configure(Object.assign({}, mode, { proxyPrefix: settings.proxyPrefix || '' }));
     }
+    applyFontSize();
     const favs = await Store.loadFavorites();
     // 同步后台刷新开关到主进程（关闭窗口是否保留进程），并监听托盘"刷新"指令
     if (window.electronAPI && window.electronAPI.setBackgroundRefresh) {
@@ -1739,6 +2869,9 @@
       });
     }
     favs.forEach(it => state.favorites.set(favKey(it), it));
+    state.readKeys = await Store.loadReadState();
+    state.sourceHealth = await Store.loadSourceHealth();
+    state.tags = await Store.loadTags();
     userSources = await Store.loadUserSources();
     userSourceIds = new Set(userSources.map(s => s.id));
     if (userSources.length) SOURCES.NEWS_SOURCES = SOURCES.NEWS_SOURCES.concat(userSources);
@@ -1748,6 +2881,7 @@
 
     bindUI();
     renderSourceFilterChips();
+    renderTagChips();
     renderHotTabs();
     renderHot();
     renderNews();
@@ -1756,6 +2890,10 @@
     setupAutoRefresh();
 
     if (settings.autoRefreshOnStart) refresh();
+    // 启动后自动生成每日简报（可选，需启用 LLM）
+    if (settings.llm && settings.llm.enabled && settings.llm.briefAuto) {
+      setTimeout(generateBrief, 4000);
+    }
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

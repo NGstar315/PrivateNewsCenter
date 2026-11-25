@@ -37,12 +37,23 @@
   let policy = MODES.balanced;
   // 按源缓存 ETag / Last-Modified，用于条件请求（跳过未变动源）
   const feedHeaders = new Map();
+  // 自定义 CORS 代理前缀（空 = 内置 allorigins）；格式要求以 "url=" 结尾
+  let proxyPrefix = '';
+
+  function proxyUrl(url) {
+    if (proxyPrefix) return proxyPrefix + encodeURIComponent(url);
+    return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
+  }
 
   const DataLayer = {
     MODES,
     configure(p) {
-      if (p && typeof p.concurrency === 'number') {
-        policy = Object.assign({}, policy, p);
+      if (!p) return;
+      if (typeof p.concurrency === 'number') {
+        policy = Object.assign({}, policy, { concurrency: p.concurrency });
+      }
+      if (typeof p.proxyPrefix === 'string') {
+        proxyPrefix = p.proxyPrefix;
       }
     },
 
@@ -58,7 +69,7 @@
           console.warn('[fetchText electron failed, try proxy]', url, e && e.message);
         }
       }
-      const proxied = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
+      const proxied = proxyUrl(url);
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 20000);
       try {
@@ -119,6 +130,7 @@
         await mapPool(newsSources, policy.concurrency, async (src) => {
           const label = '新闻 · ' + src.name;
           let items = [];
+          let fetchErr = null;
           try {
             const urls = [src.url].concat(src.fallbacks || []);
             const prev = policy.conditional ? (feedHeaders.get(src.url) || {}) : {};
@@ -130,7 +142,12 @@
               }
             }
           } catch (e) {
+            fetchErr = e;
             console.warn('[新闻源失败]', src.name, e && e.message);
+          }
+          // 记录信源健康度（成功/失败/连续失败次数）
+          if (global.Store && global.Store.recordSourceHealth) {
+            global.Store.recordSourceHealth(src.id, !fetchErr, fetchErr && fetchErr.message);
           }
           if (items.length) {
             for (const it of items) news.push(it);
@@ -146,6 +163,9 @@
         await mapPool(hotSources, policy.concurrency, async (src) => {
           const r = await this.fetchHotSource(src);
           hot[src.id] = { name: src.name, grade: src.grade, region: src.region, items: r.items || [], error: r.error };
+          if (global.Store && global.Store.recordSourceHealth) {
+            global.Store.recordSourceHealth(src.id, !r.error, r.error);
+          }
           done++;
           if (onProgress) onProgress(done, total, '热搜 · ' + src.name);
         });
@@ -188,7 +208,7 @@
           } catch (he) {
             // 直接网页失败时，尝试通过 CORS 代理抓取网页
             try {
-              items = await tryHtml('https://api.allorigins.win/raw?url=' + encodeURIComponent(src.html.url));
+              items = await tryHtml(proxyUrl(src.html.url));
               if (items && items.length) error = null;
               else throw new Error('代理网页未解析到条目');
             } catch (pe) {
@@ -210,7 +230,7 @@
             items = await tryHtml(src.html.url);
           } catch (he) {
             try {
-              items = await tryHtml('https://api.allorigins.win/raw?url=' + encodeURIComponent(src.html.url));
+              items = await tryHtml(proxyUrl(src.html.url));
             } catch (pe) {
               error = (error ? error + '；' : '') + '网页：' + (he && he.message);
             }

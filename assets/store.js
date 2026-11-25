@@ -49,6 +49,36 @@
       autoRefreshOnStart: true,
       sources: {},                 // { sourceId: true/false } 启停，默认 true
       updateLine: 'github',        // 'github'(首选) | 'gitee'(备用)：更新检查线路，写死在 updater.js
+      fontSize: 'm',               // 正文字号：s(小) / m(中) / l(大)
+      modalFooter: 'docked',       // 文章弹窗底部工具栏：docked(常驻) / collapsed(收起为悬浮按钮)
+      pinFavorites: true,          // 新闻页置顶收藏新闻
+      pinWatched: true,            // 新闻页置顶「重点关注信源」的资讯
+      watchedSources: [],          // 重点关注信源 id 列表
+      sourceUserTags: {},          // 信源自定义标签：sourceId -> [tag]
+      sourcePaid: {},              // 信源是否付费：sourceId -> true
+      proxyPrefix: '',             // 自定义 CORS 代理前缀（空=内置 allorigins）；格式如 https://your-proxy/raw?url=
+      watchlist: [],               // 订阅关键词列表：命中的新新闻触发系统通知
+      rules: [],                   // 自动规则列表：{ id, pattern, field, action, enabled }
+      llm: {                       // 可选 LLM 接入（翻译/简报），默认关闭
+        enabled: false,
+        provider: 'openai',        // 'openai'(兼容) | 'ollama'(本地)
+        apiKey: '',
+        baseUrl: '',               // openai 默认 https://api.openai.com/v1；ollama 默认 http://localhost:11434
+        model: '',                 // openai 默认 gpt-4o-mini；ollama 默认 qwen2.5
+        briefAuto: false           // 启动时自动生成每日简报
+      },
+      tts: {                       // 朗读语音源
+        provider: 'system',        // 'system'(Web Speech) | 'cloud'(LLM 服务商 TTS)
+        voice: 'zh-CN'
+      },
+      fever: {                     // Fever API 只读接口（供第三方客户端读取）
+        enabled: false,
+        key: '',
+        port: 0                    // 0=自动分配
+      },
+      rsshub: {                    // RSSHub 实例地址
+        base: 'https://rsshub.app'
+      },
       hot: {                       // 热搜榜单开关与显示条数
         weibo: true,
         baidu: true,
@@ -127,15 +157,24 @@
       return Object.assign(defs, parsed, {
         sources: Object.assign(defs.sources, parsed.sources || {}),
         hot: Object.assign(defs.hot, parsed.hot || {}),
-        geo: Object.assign(defs.geo, parsed.geo || {})
+        geo: Object.assign(defs.geo, parsed.geo || {}),
+        llm: Object.assign(defs.llm, parsed.llm || {}),
+        tts: Object.assign(defs.tts, parsed.tts || {}),
+        fever: Object.assign(defs.fever, parsed.fever || {}),
+        rsshub: Object.assign(defs.rsshub, parsed.rsshub || {})
       });
     } catch (_) { return defaultSettings(); }
   }
   async function saveSettings(s) {
-    if (!isElectron) return;
+    if (!isElectron) return false;
     try {
-      await global.electronAPI.storage.write('settings.json', JSON.stringify(s, null, 2));
-    } catch (_) { /* ignore */ }
+      const ok = await global.electronAPI.storage.write('settings.json', JSON.stringify(s, null, 2));
+      if (!ok) throw new Error('storage.write 返回 false');
+      return true;
+    } catch (e) {
+      console.warn('[store] saveSettings failed:', e && e.message);
+      return false;
+    }
   }
 
   // ---------- 新闻缓存 ----------
@@ -161,13 +200,15 @@
     } catch (_) { return []; }
   }
 
-  // 把本次刷新结果与现有缓存合并去重；按"发布日期"分文件落盘；返回 { merged, added, added7 }
+  // 把本次刷新结果与现有缓存合并去重；仅重写有变更的日期分片（增量写入）；返回 { merged, added, added7 }
   async function mergeAndPersist(newItems) {
     const days = await currentWindowDays();
     const existing = await loadCachedNews();
     const map = new Map();
     for (const it of existing) map.set(dedupeKey(it), it);
+    const dirtyDates = new Set();
     let added = 0, added7 = 0;
+    const addedKeys = [];
     for (const it of newItems) {
       if (!withinWindow(it, days)) continue; // 超出窗口的新闻不写入（保持列表新鲜）
       const k = dedupeKey(it);
@@ -175,20 +216,25 @@
         it.cachedDate = publishDateStr(it); // 标记其发布日期，便于"获取某一天"
         map.set(k, it);
         added++;
+        addedKeys.push(k);
         if (withinWindow(it, WINDOW_WEEK_DAYS)) added7++; // 统计近 7 天内的新增
+        dirtyDates.add(publishDateStr(it));
       } else {
-        // 已存在：用本次更新的 content/cover 覆盖（若更新了）
+        // 已存在：用本次更新的 content/cover 覆盖（若更新了），并标记该日期分片为脏
         const old = map.get(k);
-        if (it.content && !old.content) { old.content = it.content; }
-        if (it.cover && !old.cover) { old.cover = it.cover; }
+        let changed = false;
+        if (it.content && !old.content) { old.content = it.content; changed = true; }
+        if (it.cover && !old.cover) { old.cover = it.cover; changed = true; }
+        if (changed) dirtyDates.add(publishDateStr(old));
       }
     }
     const merged = Array.from(map.values());
 
-    // 按发布日期分文件落盘（news_cache_<发布日期>.json）
+    // 按发布日期分文件落盘，但仅重写 dirty 日期分片（未变更的日期文件跳过，避免全量写放大）
     const byDate = new Map();
     for (const it of merged) {
       const ds = publishDateStr(it);
+      if (!dirtyDates.has(ds)) continue;
       if (!byDate.has(ds)) byDate.set(ds, []);
       byDate.get(ds).push(it);
     }
@@ -209,7 +255,7 @@
       }
     } catch (_) { /* ignore */ }
 
-    return { merged, added, added7 };
+    return { merged, added, added7, addedKeys };
   }
 
   // 清理某个日期或全部缓存
@@ -221,6 +267,16 @@
   async function clearAllCache() {
     if (!isElectron) return;
     await global.electronAPI.storage.deleteDir('cache', true);
+    // 连带清理已下载的在线文档（PDF 等），避免清理缓存后仍占用磁盘
+    try { await global.electronAPI.clearDownloads(); } catch (_) { /* ignore */ }
+  }
+  async function clearDownloads() {
+    if (!isElectron) return { ok: true, count: 0 };
+    try { return await global.electronAPI.clearDownloads(); } catch (_) { return { ok: false }; }
+  }
+  async function downloadsInfo() {
+    if (!isElectron) return { count: 0, bytes: 0 };
+    try { return await global.electronAPI.downloadsInfo(); } catch (_) { return { count: 0, bytes: 0 }; }
   }
 
   // ---------- 收藏 ----------
@@ -233,9 +289,96 @@
     } catch (_) { return []; }
   }
   async function saveFavorites(list) {
+    if (!isElectron) return false;
+    try {
+      const ok = await global.electronAPI.storage.write('favorites.json', JSON.stringify(list, null, 2));
+      if (!ok) throw new Error('storage.write 返回 false');
+      return true;
+    } catch (e) {
+      console.warn('[store] saveFavorites failed:', e && e.message);
+      return false;
+    }
+  }
+
+  // ---------- 已读状态（dedupeKey -> 已读时间戳） ----------
+  const READ_STATE_FILE = 'read_state.json';
+  async function loadReadState() {
+    if (!isElectron) return new Map();
+    try {
+      const raw = await global.electronAPI.storage.read(READ_STATE_FILE);
+      if (!raw) return new Map();
+      const obj = JSON.parse(raw);
+      const m = new Map();
+      for (const k of Object.keys(obj || {})) m.set(k, obj[k]);
+      return m;
+    } catch (_) { return new Map(); }
+  }
+  async function saveReadState(map) {
     if (!isElectron) return;
     try {
-      await global.electronAPI.storage.write('favorites.json', JSON.stringify(list, null, 2));
+      // 仅保留最近 5000 条，避免无限增长
+      const obj = {};
+      const entries = Array.from(map.entries());
+      if (entries.length > 5000) {
+        entries.sort((a, b) => (b[1] || 0) - (a[1] || 0));
+        for (const [k, t] of entries.slice(0, 5000)) obj[k] = t;
+      } else {
+        for (const [k, t] of entries) obj[k] = t;
+      }
+      await global.electronAPI.storage.write(READ_STATE_FILE, JSON.stringify(obj));
+    } catch (_) { /* ignore */ }
+  }
+
+  // ---------- 信源健康度（sourceId -> { ok, error, consecutiveFails, lastTry, lastOk }） ----------
+  const HEALTH_FILE = 'source_health.json';
+  async function loadSourceHealth() {
+    if (!isElectron) return {};
+    try {
+      const raw = await global.electronAPI.storage.read(HEALTH_FILE);
+      return raw ? JSON.parse(raw) : {};
+    } catch (_) { return {}; }
+  }
+  async function saveSourceHealth(h) {
+    if (!isElectron) return;
+    try { await global.electronAPI.storage.write(HEALTH_FILE, JSON.stringify(h || {})); } catch (_) { /* ignore */ }
+  }
+  async function recordSourceHealth(srcId, ok, error) {
+    if (!isElectron || !srcId) return;
+    try {
+      const h = await loadSourceHealth();
+      const now = Date.now();
+      const prev = h[srcId] || { consecutiveFails: 0, lastOk: 0 };
+      const consecutiveFails = ok ? 0 : (prev.consecutiveFails || 0) + 1;
+      h[srcId] = {
+        ok: !!ok,
+        error: error || '',
+        consecutiveFails,
+        lastTry: now,
+        lastOk: ok ? now : (prev.lastOk || 0)
+      };
+      await saveSourceHealth(h);
+    } catch (_) { /* ignore */ }
+  }
+
+  // ---------- 标签（dedupeKey -> string[]） ----------
+  const TAGS_FILE = 'tags.json';
+  async function loadTags() {
+    if (!isElectron) return new Map();
+    try {
+      const raw = await global.electronAPI.storage.read(TAGS_FILE);
+      if (!raw) return new Map();
+      const obj = JSON.parse(raw);
+      const m = new Map();
+      for (const k of Object.keys(obj || {})) m.set(k, Array.isArray(obj[k]) ? obj[k] : []);
+      return m;
+    } catch (_) { return new Map(); }
+  }
+  async function saveTags(map) {
+    if (!isElectron) return;
+    try {
+      const obj = {};
+      for (const [k, v] of map.entries()) if (v && v.length) obj[k] = v;
+      await global.electronAPI.storage.write(TAGS_FILE, JSON.stringify(obj));
     } catch (_) { /* ignore */ }
   }
 
@@ -307,6 +450,10 @@
     loadFavorites, saveFavorites,
     cacheImage,
     loadUserSources, saveUserSources,
+    loadReadState, saveReadState,
+    loadSourceHealth, recordSourceHealth,
+    loadTags, saveTags,
+    clearDownloads, downloadsInfo,
     recordGeoCall, getGeoUsage
   };
 

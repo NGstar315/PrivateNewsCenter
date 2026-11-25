@@ -28,6 +28,7 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { URL } = require('url');
 
 const CHECK_DELAY_MS = 5000;
@@ -150,11 +151,11 @@ function readVersionUrls() {
     : [GITHUB_VERSION_URL, GITEE_VERSION_URL];
 }
 
-// 把 version.json 里的 asar/installer 字段统一成 {url, mirror}
+// 把 version.json 里的 asar/installer 字段统一成 {url, mirror, sha256}
 function pickAsset(field) {
   if (!field) return null;
-  if (typeof field === 'string') return { url: field, mirror: null };
-  return { url: field.url || null, mirror: field.mirror || null };
+  if (typeof field === 'string') return { url: field, mirror: null, sha256: null };
+  return { url: field.url || null, mirror: field.mirror || null, sha256: field.sha256 || null };
 }
 
 // 仅比较 Electron 主.次号：补丁号变化（31.3.0→31.3.1）不触发完整重装
@@ -330,6 +331,14 @@ async function downloadUpdate(info) {
   if (!buffer || buffer.length < 1000 ||
       !(buffer[0] === 0x21 && buffer[1] === 0x41 && buffer[2] === 0x52 && buffer[3] === 0x53)) {
     return { ok: false, reason: 'invalid-asar' };
+  }
+
+  // 完整性校验：version.json 提供 sha256 时强校验，防止下载包被篡改
+  if (asar.sha256) {
+    const actual = crypto.createHash('sha256').update(buffer).digest('hex');
+    if (actual.toLowerCase() !== String(asar.sha256).toLowerCase()) {
+      return { ok: false, reason: 'sha256-mismatch' };
+    }
   }
 
   return applyAsar(buffer);

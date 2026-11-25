@@ -27,6 +27,8 @@
     srcFilters: { region: 'all', grade: 'all', lean: 'all', search: '' },
     hotTab: 'weibo',
     favorites: new Map(),   // favKey -> item
+    readKeys: new Map(),    // dedupeKey -> 已读时间戳
+    sourceHealth: {},       // sourceId -> { ok, error, consecutiveFails, lastTry, lastOk }
     settings: null,
     calendarDate: null,
     vizRange: 'all',
@@ -38,6 +40,7 @@
   let userSources = [];  // 用户自定义信源（来自 data/user_sources.json）
   let userSourceIds = new Set();  // 用户自定义信源 id 集合（用于判断可否删除）
   let pendingNewKeys = new Set();  // 本次渲染需要"入场动画"的新闻 dedupeKey 集合（每次渲染后清空）
+  let clusterExpanded = new Set(); // 同题聚类中已展开的组 id（会话内，不持久化）
 
   // 封面图延迟加载观察器：卡片进入视口附近再真正加载图片，避免一次性发起海量请求拖慢主线程
   let coverObserver = null;
@@ -130,6 +133,14 @@
   }
   function favKey(it) { return (it.sourceId || '') + '|' + (it.link || '') + '|' + (it.title || ''); }
   function isFav(it) { return state.favorites.has(favKey(it)); }
+  function isRead(it) { return state.readKeys.has(favKey(it)); }
+  function markRead(it) {
+    if (!it || isRead(it)) return;
+    state.readKeys.set(favKey(it), Date.now());
+    Store.saveReadState(state.readKeys);
+    const card = document.querySelector('.card[data-key="' + CSS.escape(Store.dedupeKey(it)) + '"]');
+    if (card) card.classList.add('read');
+  }
   function sourceWebsite(src) {
     if (!src) return '';
     const logo = src.profile && src.profile.logo;
@@ -150,6 +161,7 @@
     document.querySelectorAll('#top-nav .nav-pill').forEach(b => b.classList.toggle('active', b.dataset.page === page));
     document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + page));
     if (page === 'sources') renderSources();
+    if (page === 'favorites') renderFavorites();
     if (page === 'viz') renderViz();
     if (page === 'settings') renderSettings();
   }
@@ -179,14 +191,66 @@
     return wrap;
   }
 
+  const SANITIZE_ALLOW_TAGS = new Set([
+    'p','div','span','br','hr','h1','h2','h3','h4','h5','h6',
+    'ul','ol','li','blockquote','pre','code','em','strong','b','i','u','s','del','sub','sup',
+    'a','img','table','thead','tbody','tr','td','th','caption','figure','figcaption','picture','source'
+  ]);
+  const SANITIZE_ALLOW_ATTRS = new Set(['href','src','alt','title']);
+  function cleanSanitizedTree(root) {
+    const walk = (node) => {
+      const children = Array.from(node.childNodes || []);
+      for (const child of children) {
+        if (child.nodeType === 1) {
+          const tag = child.tagName.toLowerCase();
+          if (!SANITIZE_ALLOW_TAGS.has(tag)) { child.remove(); continue; }
+          for (const a of Array.from(child.attributes || [])) {
+            const name = a.name.toLowerCase();
+            if (name.startsWith('on') || !SANITIZE_ALLOW_ATTRS.has(name)) {
+              child.removeAttribute(a.name);
+            } else if (/^\s*(javascript|vbscript|data\s*:|file\s*:)/i.test(a.value || '')) {
+              child.removeAttribute(a.name);
+            }
+          }
+          if (tag === 'a') {
+            const href = child.getAttribute('href') || '';
+            if (href && !/^(https?:|mailto:|#|\/\/)/i.test(href.trim())) child.removeAttribute('href');
+          }
+          if (tag === 'img') {
+            const src = child.getAttribute('src') || '';
+            if (src && !/^(https?:|file:|data:image\/)/i.test(src.trim())) child.removeAttribute('src');
+          }
+          walk(child);
+        } else if (child.nodeType === 8) {
+          child.remove(); // 注释节点
+        }
+      }
+    };
+    walk(root);
+  }
+
   function sanitizeHtml(html) {
     if (!html) return '';
-    return String(html)
+    let out = String(html)
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
-      .replace(/\s(on\w+\s*=)/gi, ' data-disabled-$1')
-      .replace(/javascript:/gi, 'disabled-js:');
+      .replace(/<object[\s\S]*?<\/object>/gi, '')
+      .replace(/<embed[\s\S]*?>/gi, '')
+      .replace(/<link[\s\S]*?>/gi, '')
+      .replace(/<meta[\s\S]*?>/gi, '');
+    if (typeof DOMParser !== 'undefined') {
+      try {
+        const doc = new DOMParser().parseFromString('<div id="__san__">' + out + '</div>', 'text/html');
+        cleanSanitizedTree(doc.body);
+        const wrap = doc.getElementById('__san__');
+        out = wrap ? wrap.innerHTML : doc.body.innerHTML;
+      } catch (_) { /* 解析失败则退回正则兜底 */ }
+    }
+    return out
+      .replace(/javascript:/gi, 'disabled-js:')
+      .replace(/vbscript:/gi, 'disabled-vb:')
+      .replace(/data:text\/html/gi, 'disabled-data:');
   }
 
   // ---------- 新闻渲染（含时间分割线） ----------
@@ -214,11 +278,33 @@
     return true;
   }
 
+  // 同题聚类：标题相似度 > 0.8 且来自不同信源的新闻视为同一事件，折叠成一组
+  function clusterNews(list) {
+    const groups = [];
+    const used = new Set();
+    for (let i = 0; i < list.length; i++) {
+      if (used.has(i)) continue;
+      const a = list[i];
+      const group = { main: a, items: [a] };
+      for (let j = i + 1; j < list.length; j++) {
+        if (used.has(j)) continue;
+        const b = list[j];
+        if (b.sourceId !== a.sourceId && similarity(a.title, b.title) > 0.8) {
+          group.items.push(b);
+          used.add(j);
+        }
+      }
+      used.add(i);
+      groups.push(group);
+    }
+    return groups;
+  }
+
   // 单张卡片 DOM 构造（抽出复用，便于分片渲染）
   function buildCard(it, animate) {
     const key = Store.dedupeKey(it);
     const card = document.createElement('article');
-    card.className = 'card' + (isFav(it) ? ' fav-mark' : '');
+    card.className = 'card' + (isFav(it) ? ' fav-mark' : '') + (isRead(it) ? ' read' : '');
     card.dataset.key = key;
     if (animate && pendingNewKeys.has(key)) card.classList.add('entering');
     const cats = (it.categories || []).map(c => CATEGORY_NAMES[c] || c).join(' · ');
@@ -246,6 +332,18 @@
     return card;
   }
 
+  // 首次启动无缓存时的骨架屏
+  function renderNewsSkeleton() {
+    const grid = el('news-grid');
+    if (!grid) return;
+    let html = '';
+    for (let i = 0; i < 6; i++) {
+      html += '<div class="skeleton-card"><div class="skeleton-cover"></div><div class="skeleton-body">' +
+        '<div class="skeleton-line w60"></div><div class="skeleton-line w90"></div><div class="skeleton-line w40"></div></div></div>';
+    }
+    grid.innerHTML = html;
+  }
+
   // 将列表按日期分组并渲染前 N 条；超过部分通过「加载更多」分批追加，避免一次性插入海量 DOM 导致掉帧
   function renderNews(opts) {
     opts = opts || {};
@@ -263,16 +361,19 @@
     el('news-count').textContent = list.length + ' 条';
 
     if (list.length === 0) {
-      grid.innerHTML = '<div class="placeholder">没有符合条件的新闻，试试调整筛选或点「立即刷新」。</div>';
+      if (state.news.length === 0) renderNewsSkeleton();
+      else grid.innerHTML = '<div class="placeholder">没有符合条件的新闻，试试调整筛选或点「立即刷新」。</div>';
       pendingNewKeys.clear();
       return;
     }
 
     const limit = Math.max(30, state.renderLimit || 60);
     const visible = list.slice(0, limit);
+    const groups = clusterNews(visible);
     const frag = document.createDocumentFragment();
     let lastMonth = '', lastDay = '';
-    for (const it of visible) {
+    for (const g of groups) {
+      const it = g.main;
       const ds = dateStr(it.timestamp || Date.now());
       const d = new Date(it.timestamp || Date.now());
       const month = ds.slice(0, 7);
@@ -291,6 +392,31 @@
       }
       lastDay = ds;
       frag.appendChild(buildCard(it, animate));
+      // 同题聚类折叠块：主卡下方展示同题报道，可展开
+      if (g.items.length > 1) {
+        const cid = Store.dedupeKey(g.main);
+        const collapsed = !clusterExpanded.has(cid);
+        const wrap = document.createElement('div');
+        wrap.className = 'cluster';
+        if (collapsed) {
+          wrap.innerHTML = '<button class="cluster-toggle">另有 ' + (g.items.length - 1) + ' 家媒体同题报道 ▸</button>';
+        } else {
+          wrap.innerHTML = '<button class="cluster-toggle">收起同题报道（' + (g.items.length - 1) + ' 家）▾</button>';
+          for (const sub of g.items.slice(1)) {
+            const row = document.createElement('button');
+            row.className = 'cluster-item';
+            row.innerHTML = '<span class="cluster-src">' + esc(sub.source || '') + '</span><span class="cluster-title">' + esc(sub.title || '') + '</span>';
+            row.addEventListener('click', () => openArticleModal(sub));
+            wrap.appendChild(row);
+          }
+        }
+        const toggle = wrap.querySelector('.cluster-toggle');
+        if (toggle) toggle.addEventListener('click', () => {
+          if (clusterExpanded.has(cid)) clusterExpanded.delete(cid); else clusterExpanded.add(cid);
+          renderNews({ animate: false });
+        });
+        frag.appendChild(wrap);
+      }
     }
 
     grid.innerHTML = '';
@@ -443,9 +569,80 @@
     const openBtn = el('hot-open');
     openBtn.onclick = () => { if (it.url) openLink(it.url); };
     openBtn.disabled = !it.url;
+    const contentEl = el('hot-content');
+    contentEl.innerHTML = '';
     el('hot-modal').classList.remove('hidden');
+
+    if (!it.url) return;
+    const loader = document.createElement('p'); loader.className = 'no-content'; loader.textContent = '正在获取条目详情…';
+    contentEl.appendChild(loader);
+    DataLayer.fetchText(it.url).then(res => {
+      const html = (res && res.body != null) ? res.body : res;
+      if (!html || !html.trim()) throw new Error('empty');
+      const full = FeedParser.extractArticle(html, it.url, { clean: settings.smartClean !== false });
+      const text = FeedParser.stripHtml(full || '').trim();
+      if (text.length < 80) throw new Error('no content');
+      contentEl.innerHTML = sanitizeHtml(full);
+      contentEl.querySelectorAll('a').forEach(a => {
+        a.target = '_blank'; a.rel = 'noopener';
+        a.addEventListener('click', (e) => { const href = a.getAttribute('href'); if (href) { e.preventDefault(); openLink(href); } });
+      });
+    }).catch(() => {
+      contentEl.innerHTML = '<p class="no-content">无法在当前网络下获取该条目详情，可点击「用浏览器打开」阅读。</p>';
+    });
   }
   function closeHotModal() { el('hot-modal').classList.add('hidden'); }
+
+  // ---------- 更新状态提示弹窗（替代原生 dialog） ----------
+  function showUpdateStatusModal(data) {
+    data = data || {};
+    const modal = el('update-status-modal');
+    const iconWrap = el('update-status-icon');
+    const isWarning = data.type === 'warning';
+    iconWrap.className = 'update-status-icon' + (isWarning ? ' warning' : ' info');
+    iconWrap.innerHTML = isWarning
+      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>';
+    el('update-status-title').textContent = data.title || '提示';
+    el('update-status-message').textContent = data.message || '';
+    const detail = el('update-status-detail');
+    if (data.detail) { detail.textContent = data.detail; detail.classList.remove('hidden'); }
+    else { detail.classList.add('hidden'); }
+    modal.classList.remove('hidden');
+  }
+  function hideUpdateStatusModal() { el('update-status-modal').classList.add('hidden'); }
+
+  // ---------- 设置页检查更新状态标签与进度条 ----------
+  function setUpdateStatus(text, mood) {
+    const s = el('update-status');
+    if (!s) return;
+    s.textContent = text || '';
+    s.className = 'update-status' + (mood ? ' ' + mood : '');
+  }
+  function showUpdateBar() {
+    const wrap = el('update-bar-wrap');
+    if (wrap) wrap.classList.remove('hidden');
+  }
+  function hideUpdateBar() {
+    const wrap = el('update-bar-wrap');
+    const fill = el('update-bar-fill');
+    const pct = el('update-bar-pct');
+    if (wrap) wrap.classList.add('hidden');
+    if (fill) { fill.style.width = '0%'; fill.classList.remove('done'); }
+    if (pct) pct.textContent = '0%';
+  }
+  function setUpdateBar(pct) {
+    const fill = el('update-bar-fill');
+    const pctEl = el('update-bar-pct');
+    if (fill) fill.style.width = pct + '%';
+    if (pctEl) pctEl.textContent = pct + '%';
+  }
+  function markUpdateBarDone() {
+    const fill = el('update-bar-fill');
+    const pctEl = el('update-bar-pct');
+    if (fill) { fill.style.width = '100%'; fill.classList.add('done'); }
+    if (pctEl) pctEl.textContent = '100%';
+  }
 
   function formatHeat(n) {
     if (n == null) return '';
@@ -655,23 +852,32 @@
   async function refreshCacheStats() {
     const api = window.electronAPI && window.electronAPI.storage;
     if (!api || !api.dirInfo) return;
+    const btn = el('refresh-stats');
+    const origText = btn ? btn.textContent : '刷新统计';
     try {
+      if (btn) { btn.classList.add('loading'); btn.textContent = '刷新中…'; btn.disabled = true; }
       const img = await api.dirInfo('images');
       const cache = await api.dirInfo('cache');
       el('stat-image-size').textContent = formatBytes(img && img.bytes);
       el('stat-news-size').textContent = formatBytes(cache && cache.bytes);
       el('stat-image-files').textContent = (img && img.files != null ? img.files : '—') + ' 个文件';
+      showToast('缓存统计已刷新');
     } catch (e) {
       el('stat-image-size').textContent = '—';
       el('stat-news-size').textContent = '—';
       el('stat-image-files').textContent = '—';
+      showToast('刷新统计失败');
+    } finally {
+      if (btn) { btn.classList.remove('loading'); btn.textContent = origText; btn.disabled = false; }
     }
   }
 
   // ---------- 文章详情弹窗 ----------
   let currentModalItem = null;
+  let heroScrolled = false;
   function openArticleModal(item) {
     currentModalItem = item;
+    markRead(item);
     el('modal-title').textContent = item.title || '无标题';
     const cats = (item.categories || []).map(c => CATEGORY_NAMES[c] || c).join(' · ');
     const regionText = REGION_NAMES[item.region] || item.region || '';
@@ -683,6 +889,7 @@
     coverWrap.appendChild(heroCover);
 
     el('modal-hero').classList.remove('scrolled');
+    heroScrolled = false;
     el('modal-body').scrollTop = 0;
 
     renderModalContent(item.content || item.summary, !item.content && item.summary);
@@ -767,27 +974,40 @@
     const contentEl = el('modal-content');
     const loader = document.createElement('div'); loader.className = 'inline-loader'; loader.textContent = '正在获取完整正文…';
     contentEl.appendChild(loader);
-    try {
-      const html = await DataLayer.fetchText(item.link);
-      if (!html || !html.trim()) throw new Error('返回内容为空');
-      const full = FeedParser.extractArticle(html, item.link, { clean: settings.smartClean !== false });
+
+    async function doExtract(htmlText, note) {
+      if (!htmlText || !htmlText.trim()) throw new Error(note || '返回内容为空');
+      const full = FeedParser.extractArticle(htmlText, item.link, { clean: settings.smartClean !== false });
       const fullText = FeedParser.stripHtml(full || '').trim();
-      const originalText = FeedParser.stripHtml(item.content || '').trim();
-      if (fullText.length < 160) throw new Error('未能从页面解析出正文（站点访问保护）');
+      if (fullText.length < 80) throw new Error('未能从页面解析出正文');
+      const oldText = FeedParser.stripHtml(item.content || '').trim();
       const oldImages = (item.content || '').split('<img').length - 1;
       const newImages = (full || '').split('<img').length - 1;
-      if (fullText.length > Math.max(120, originalText.length * 1.1) || newImages > oldImages) {
+      if (fullText.length > Math.max(80, oldText.length * 1.05) || newImages > oldImages || oldText.length < 200) {
         item.content = full;
         if (currentModalItem === item) renderModalContent(full, false);
       } else if (currentModalItem === item) {
         renderModalContent(item.content || item.summary, false);
       }
+    }
+
+    try {
+      const res = await DataLayer.fetchText(item.link);
+      const html = (res && res.body != null) ? res.body : res;
+      await doExtract(html);
     } catch (e) {
-      if (currentModalItem === item) {
-        const base = item.content || item.summary;
-        // 已有正文/摘要则不打扰；仅当确实无任何内容时给出温和提示
-        const note = base ? '' : '该信源仅提供标题/摘要，无法获取完整正文，可点击「用浏览器打开原文」阅读。';
-        renderModalContent(base, false, note);
+      console.warn('[loadFullArticle] 直接抓取失败，尝试代理回退', item.link, e && e.message);
+      try {
+        const proxyBase = settings.proxyPrefix || 'https://api.allorigins.win/raw?url=';
+        const proxyRes = await DataLayer.fetchText(proxyBase + encodeURIComponent(item.link));
+        const proxyHtml = (proxyRes && proxyRes.body != null) ? proxyRes.body : proxyRes;
+        await doExtract(proxyHtml, '代理返回内容为空');
+      } catch (pe) {
+        if (currentModalItem === item) {
+          const base = item.content || item.summary;
+          const note = base ? '' : '该信源仅提供标题/摘要，无法获取完整正文，可点击「用浏览器打开原文」阅读。';
+          renderModalContent(base, false, note);
+        }
       }
     } finally {
       if (currentModalItem === item) { const old = contentEl.querySelector('.inline-loader'); if (old) old.remove(); }
@@ -804,6 +1024,31 @@
     favBtn.textContent = isFav(item) ? '★ 已收藏' : '☆ 收藏';
     favBtn.classList.toggle('favorited', isFav(item));
     renderNews();
+    if (state.page === 'favorites') renderFavorites();
+  }
+
+  // ---------- 收藏页 ----------
+  function renderFavorites() {
+    const grid = el('fav-grid');
+    const countEl = el('fav-count');
+    if (!grid) return;
+    const list = Array.from(state.favorites.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    if (countEl) countEl.textContent = list.length + ' 条';
+    if (list.length === 0) {
+      grid.innerHTML = '<div class="placeholder">还没有收藏。打开任意新闻，点击「☆ 收藏」即可在此集中查看。</div>';
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const it of list) frag.appendChild(buildCard(it, false));
+    grid.innerHTML = '';
+    grid.appendChild(frag);
+  }
+  async function clearFavorites() {
+    state.favorites.clear();
+    await Store.saveFavorites([]);
+    renderFavorites();
+    renderNews();
+    showToast('已清空全部收藏');
   }
 
   // ---------- 日历（含每日新闻量标签 + 水位波浪 + 清除筛选） ----------
@@ -846,7 +1091,10 @@
       if (cnt > 0 && monthMax > 0) {
         const pct = Math.round((cnt / monthMax) * 100);
         const tier = pct < 34 ? 'tier-low' : (pct < 67 ? 'tier-mid' : 'tier-high');
-        fill = '<div class="cal-fill ' + tier + '" style="height:' + pct + '%"></div>';
+        const waveOn = settings.calendarWave !== false;
+        fill = '<div class="cal-fill ' + tier + (waveOn ? ' wave-anim' : '') + '" style="height:' + pct + '%">' +
+               (waveOn ? '<span class="cal-wave"></span>' : '') +
+               '</div>';
       }
       html += '<div class="' + cls.join(' ') + '" data-date="' + ds + '">' + fill +
               '<span class="cal-inner"><span class="cal-num">' + d + '</span>' +
@@ -875,6 +1123,25 @@
     renderCalendar(); renderNews();
   }
 
+  // 日期快捷范围：获取某一天 / 某一个时段的新闻
+  function applyRangeChip(n) {
+    const now = new Date();
+    const today = dateStr(now.getTime());
+    let from;
+    if (n === 'today') from = today;
+    else { const d = new Date(now.getTime() - (parseInt(n, 10) - 1) * 86400000); from = dateStr(d.getTime()); }
+    el('date-from').value = from;
+    el('date-to').value = today;
+    state.filters.dateFrom = from;
+    state.filters.dateTo = today;
+    state.calendarDate = null; // 用范围筛选时清除单日日历筛选，避免冲突
+    renderCalendar(); resetAndRenderNews();
+  }
+  function refreshCurrentRange() {
+    // 触发一次新闻刷新，确保当前筛选时段内的新闻被抓取并展示
+    refresh('news');
+  }
+
   // ---------- 发布者筛选 chips ----------
   function renderSourceFilterChips() {
     const box = el('source-filter-chips');
@@ -894,68 +1161,145 @@
     }
   }
 
-  // ---------- 刷新（可拆分：news / hot / all） ----------
+  // ---------- 热搜圆环进度（独立刷新管道的可视化） ----------
+  const RING_CIRC = 2 * Math.PI * 52; // r=52 的圆周长
+  function showHotRing() {
+    const ring = el('hot-progress-ring');
+    if (!ring) return;
+    ring.classList.remove('hidden');
+    updateHotRing(0, '准备中…');
+  }
+  function updateHotRing(pct, label) {
+    const ring = el('hot-progress-ring');
+    if (!ring) return;
+    pct = Math.max(0, Math.min(100, pct || 0));
+    const fg = ring.querySelector('.ring-fg');
+    if (fg) fg.style.strokeDashoffset = String(RING_CIRC * (1 - pct / 100));
+    const pctEl = el('hot-ring-pct');
+    if (pctEl) pctEl.textContent = pct + '%';
+    const lbl = ring.querySelector('.ring-label');
+    if (lbl && label) lbl.textContent = label;
+  }
+  function hideHotRing() {
+    const ring = el('hot-progress-ring');
+    if (!ring) return;
+    updateHotRing(100);
+    setTimeout(() => ring.classList.add('hidden'), 500);
+  }
+
+  function buildEnabledHotIds() {
+    const ids = new Set();
+    for (const s of SOURCES.HOT_SOURCES) {
+      const tab = HOT_TABS.find(t => t.ids.includes(s.id));
+      if (!tab || (settings.hot && settings.hot[tab.key] !== false)) ids.add(s.id);
+    }
+    return ids;
+  }
+
+  // 新闻刷新：保持原有机制，按发布日期分窗口落盘 + 更新 7 天饱和状态
+  async function runNews(enabled, bar, pText) {
+    const result = await DataLayer.refreshAll(
+      (done, total, label) => {
+        const pct = total ? Math.round((done / total) * 100) : 0;
+        bar.style.width = pct + '%'; pText.textContent = label + '  (' + done + '/' + total + ')';
+      },
+      (src, items) => {
+        if (!items || !items.length) return;
+        for (const it of items) pendingNewKeys.add(Store.dedupeKey(it));
+        state.news = state.news.concat(items);
+        const seen = new Set();
+        state.news = state.news.filter(it => {
+          const k = Store.dedupeKey(it);
+          if (seen.has(k)) return false;
+          seen.add(k); return true;
+        });
+        state.news.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        scheduleRender();
+      },
+      enabled, null, 'news'
+    );
+    const res = await Store.mergeAndPersist(result.news);
+    await Store.recordWindowSaturation(res.added7); // 更新近 7 天饱和状态（决定是否自动扩展到 30 天）
+    state.news = res.merged;
+    // 订阅提醒：新增新闻命中关键词时发系统通知
+    const watch = (settings.watchlist || []).map(w => String(w).trim().toLowerCase()).filter(Boolean);
+    if (watch.length && window.electronAPI && window.electronAPI.notify) {
+      const addedSet = new Set(res.addedKeys || []);
+      for (const it of res.merged) {
+        if (!addedSet.has(Store.dedupeKey(it))) continue;
+        const title = (it.title || '').toLowerCase();
+        for (const w of watch) {
+          if (title.includes(w)) {
+            window.electronAPI.notify('订阅提醒', (it.title || '') + '（' + (it.source || '') + '）');
+            break;
+          }
+        }
+      }
+    }
+    renderNews({ animate: true }); renderCalendar(); renderVizIfVisible();
+  }
+
+  // 热搜刷新：独立管道，进度走圆环，互不阻塞新闻
+  async function runHot(enabledHotIds) {
+    const result = await DataLayer.refreshAll(
+      (done, total, label) => {
+        const pct = total ? Math.round((done / total) * 100) : 0;
+        updateHotRing(pct, '榜单 ' + label);
+      },
+      null, null, enabledHotIds, 'hot'
+    );
+    state.hot = result.hot;
+    renderHot();
+  }
+
+  // 并发刷新：新闻与热搜同时获取（热搜独立管道 + 圆环进度，互不等待）
   async function refresh(mode) {
     mode = mode || 'all';
     const btns = ['refresh-news-btn', 'refresh-hot-btn', 'refresh-all-btn'].map(el);
     const pWrap = el('progress-wrap'), bar = el('progress-bar'), pText = el('progress-text');
     if (btns.some(b => b && b.disabled)) return;
     btns.forEach(b => { if (b) b.disabled = true; });
-    pWrap.classList.remove('hidden'); bar.style.width = '0%';
-    pText.textContent = '正在后台获取' + (mode === 'news' ? '新闻' : mode === 'hot' ? '热搜榜单' : '新闻与热搜') + '…';
+    const showNews = mode !== 'hot';
+    const showHot = mode !== 'news';
+    if (showNews) {
+      pWrap.classList.remove('hidden'); bar.style.width = '0%';
+      pText.textContent = '正在获取新闻…';
+    }
+    if (showHot) showHotRing();
     try {
       const enabled = enabledSourceIds();
-      const enabledHotIds = new Set();
-      for (const s of SOURCES.HOT_SOURCES) {
-        const tab = HOT_TABS.find(t => t.ids.includes(s.id));
-        if (!tab || (settings.hot && settings.hot[tab.key] !== false)) enabledHotIds.add(s.id);
-      }
-      pendingNewKeys.clear();   // 新一轮刷新，清空上一轮残留的新增标记
-      const result = await DataLayer.refreshAll(
-        (done, total, label) => {
-          const pct = total ? Math.round((done / total) * 100) : 0;
-          bar.style.width = pct + '%'; pText.textContent = label + '  (' + done + '/' + total + ')';
-        },
-        (src, items) => {
-          // 每完成一个新闻源即时追加并渲染，减少等待时间
-          if (!items || !items.length) return;
-          // 记录本次新增项，供渲染时打"入场动画"（按时间已自然排到对应日期队首）
-          for (const it of items) pendingNewKeys.add(Store.dedupeKey(it));
-          state.news = state.news.concat(items);
-          const seen = new Set();
-          state.news = state.news.filter(it => {
-            const k = Store.dedupeKey(it);
-            if (seen.has(k)) return false;
-            seen.add(k); return true;
-          });
-          state.news.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-          scheduleRender();
-        },
-        enabled, enabledHotIds, mode
-      );
-      if (mode !== 'hot') {
-        const merged = await Store.mergeAndPersist(result.news);
-        state.news = merged;
-        renderNews({ animate: true }); renderCalendar(); renderVizIfVisible();
-      }
-      if (mode !== 'news') {
-        state.hot = result.hot;
-        renderHot();
-      }
+      pendingNewKeys.clear();
+      const tasks = [];
+      if (showNews) tasks.push(runNews(enabled, bar, pText));
+      if (showHot) tasks.push(runHot(buildEnabledHotIds()));
+      // 同时跑新闻与热搜，互不等待 → 不再因等榜单而卡住新闻
+      await Promise.allSettled(tasks);
       el('last-updated').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
     } catch (e) {
-      pText.textContent = '刷新出错：' + (e && e.message || e);
+      if (pText) pText.textContent = '刷新出错：' + (e && e.message || e);
     } finally {
-      setTimeout(() => pWrap.classList.add('hidden'), 600);
+      if (showNews) setTimeout(() => pWrap.classList.add('hidden'), 600);
+      if (showHot) hideHotRing();
       btns.forEach(b => { if (b) b.disabled = false; });
     }
   }
 
   function setupAutoRefresh() {
     if (state.autoTimer) { clearInterval(state.autoTimer); state.autoTimer = null; }
-    if (settings.autoRefresh && el('auto-refresh').checked) {
+    // 同步首页开关到 settings 与设置页控件
+    settings.autoRefresh = el('auto-refresh').checked;
+    const setCb = el('set-auto-refresh');
+    if (setCb) setCb.checked = settings.autoRefresh;
+    if (settings.autoRefresh) {
       state.autoTimer = setInterval(refresh, Math.max(1, settings.refreshIntervalMinutes) * 60 * 1000);
     }
+  }
+
+  // 从设置页保存后，把新的自动刷新状态同步回首页开关与定时器
+  function syncAutoRefreshFromSettings() {
+    const homeCb = el('auto-refresh');
+    if (homeCb) homeCb.checked = settings.autoRefresh;
+    setupAutoRefresh();
   }
 
   // ---------- 可视化 ----------
@@ -983,21 +1327,27 @@
     const palette = ['#0a84ff', '#30d158', '#ff9f0a', '#ff453a', '#bf5af2', '#64d2ff', '#ffd60a'];
     function draw(id, type, labels, data, label) {
       const cv = el(id); if (!cv) return;
-      if (charts[id]) charts[id].destroy();
+      const opts = {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: type !== 'bar', labels: { color: '#a1a1a6' } } },
+        scales: {
+          x: { ticks: { color: '#a1a1a6', maxTicksLimit: 10 }, grid: { color: 'rgba(255,255,255,0.06)' } },
+          y: { ticks: { color: '#a1a1a6' }, grid: { color: 'rgba(255,255,255,0.06)' }, beginAtZero: true }
+        }
+      };
+      // 复用已有实例，仅 update，避免 destroy 重建导致的闪烁
+      const existing = charts[id];
+      if (existing && existing.config && existing.config.type === type) {
+        existing.data.labels = labels;
+        existing.data.datasets[0] = { label, data, backgroundColor: palette, borderColor: palette, borderWidth: 1 };
+        existing.update();
+        return;
+      }
+      if (existing) existing.destroy();
       charts[id] = new Chart(cv.getContext('2d'), {
         type,
         data: { labels, datasets: [{ label, data, backgroundColor: palette, borderColor: palette, borderWidth: 1 }] },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: type !== 'bar', labels: { color: '#a1a1a6' } } },
-          scales: type === 'line' ? {
-            x: { ticks: { color: '#a1a1a6', maxTicksLimit: 10 }, grid: { color: 'rgba(255,255,255,0.06)' } },
-            y: { ticks: { color: '#a1a1a6' }, grid: { color: 'rgba(255,255,255,0.06)' }, beginAtZero: true }
-          } : {
-            x: { ticks: { color: '#a1a1a6' }, grid: { color: 'rgba(255,255,255,0.06)' } },
-            y: { ticks: { color: '#a1a1a6' }, grid: { color: 'rgba(255,255,255,0.06)' }, beginAtZero: true }
-          }
-        }
+        options: opts
       });
     }
     draw('chart-category', 'doughnut', Object.keys(catCount), Object.values(catCount), '领域');
@@ -1010,15 +1360,28 @@
   }
 
   // ---------- 设置 ----------
+  function applyFontSize() {
+    const map = { s: '15px', m: '17px', l: '20px' };
+    document.documentElement.style.setProperty('--article-font-size', map[settings.fontSize] || map.m);
+  }
+  function watchlistToString() {
+    return (settings.watchlist || []).join('、');
+  }
+  function watchlistFromString(s) {
+    return String(s || '').split(/[、,，\n]+/).map(x => x.trim()).filter(Boolean);
+  }
+
   function renderSettings() {
     el('set-auto-refresh').checked = !!settings.autoRefresh;
     el('set-auto-start').checked = !!settings.autoRefreshOnStart;
     el('set-refresh-interval').value = settings.refreshIntervalMinutes;
     el('set-image-caching').value = settings.imageCaching || 'all';
     el('set-animations').checked = settings.animations !== false;
+    el('set-calendar-wave').checked = settings.calendarWave !== false;
     el('set-smart-clean').checked = settings.smartClean !== false;
     el('set-background-refresh').checked = settings.backgroundRefresh !== false;
     el('set-fetch-mode').value = settings.fetchMode || 'balanced';
+    el('set-fetch-month').checked = !!settings.fetchMonth;
     el('set-hot-maxitems').value = settings.hot && settings.hot.maxItems != null ? settings.hot.maxItems : 30;
     el('settings-hot').querySelectorAll('input[type="checkbox"]').forEach(cb => {
       const key = cb.dataset.hot;
@@ -1028,8 +1391,18 @@
     el('set-geo-key').value = settings.geo.apiKey || '';
     el('set-geo-style').value = settings.geo.mapStyleId || '';
     el('set-datadir').value = settings.dataDir || '';
+    el('set-font-size').value = settings.fontSize || 'm';
+    el('set-proxy-prefix').value = settings.proxyPrefix || '';
+    el('set-watchlist').value = watchlistToString();
+    const lt = el('update-line-toggle');
+    if (lt) lt.classList.toggle('is-secondary', settings.updateLine === 'gitee');
     if (window.electronAPI && window.electronAPI.appPaths) {
       window.electronAPI.appPaths().then(p => { el('set-current-datadir').textContent = p.dataDir; });
+    }
+    // 显示当前版本号
+    const verEl = el('set-current-version');
+    if (verEl && window.electronAPI && window.electronAPI.currentVersion) {
+      window.electronAPI.currentVersion().then(v => verEl.textContent = v || '—');
     }
 
     // 信源管理列表（新 UI：logo + 名称 + 标签 + 开关）
@@ -1118,6 +1491,17 @@
     track.className = 'toggle-track';
     toggle.appendChild(cb);
     toggle.appendChild(track);
+    // 信源健康度状态点（绿=最近成功 / 黄=偶发失败 / 红=连续失败 / 灰=未抓取）
+    const health = state.sourceHealth[s.id];
+    const dot = document.createElement('span');
+    dot.className = 'health-dot' + (health ? (health.ok ? ' ok' : (health.consecutiveFails >= 3 ? ' bad' : ' warn')) : ' none');
+    dot.title = health
+      ? ((health.ok ? '最近成功' : '连续失败 ' + health.consecutiveFails + ' 次') +
+         (health.error ? '：' + health.error : '') +
+         (health.lastTry ? ' · 上次尝试 ' + new Date(health.lastTry).toLocaleString('zh-CN', { hour12: false }) : ''))
+      : '尚未抓取过';
+    row.appendChild(dot);
+
     row.appendChild(toggle);
 
     return row;
@@ -1170,9 +1554,11 @@
     settings.refreshIntervalMinutes = parseInt(el('set-refresh-interval').value) || 15;
     settings.imageCaching = el('set-image-caching').value;
     settings.animations = el('set-animations').checked;
+    settings.calendarWave = el('set-calendar-wave').checked;
     settings.smartClean = el('set-smart-clean').checked;
     settings.backgroundRefresh = el('set-background-refresh').checked;
     settings.fetchMode = el('set-fetch-mode').value;
+    settings.fetchMonth = el('set-fetch-month').checked;
     settings.hot = settings.hot || {};
     settings.hot.maxItems = parseInt(el('set-hot-maxitems').value) || 30;
     el('settings-hot').querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -1182,6 +1568,10 @@
     settings.geo.apiKey = el('set-geo-key').value.trim();
     settings.geo.mapStyleId = el('set-geo-style').value.trim();
     settings.dataDir = el('set-datadir').value.trim();
+    settings.fontSize = el('set-font-size').value || 'm';
+    settings.proxyPrefix = el('set-proxy-prefix').value.trim();
+    settings.watchlist = watchlistFromString(el('set-watchlist').value);
+    settings.updateLine = (el('update-line-toggle') && el('update-line-toggle').classList.contains('is-secondary')) ? 'gitee' : 'github';
     settings.sources = {};
     el('settings-sources').querySelectorAll('input[type="checkbox"]').forEach(cb => {
       settings.sources[cb.dataset.id] = cb.checked;
@@ -1203,14 +1593,92 @@
   async function persistSettings(note) {
     collectSettings();
     await Store.saveSettings(settings);
+    Store.setSettings(settings); // 同步窗口配置给数据层
     if (window.electronAPI && window.electronAPI.setBackgroundRefresh) {
       window.electronAPI.setBackgroundRefresh(settings.backgroundRefresh !== false);
     }
-    setupAutoRefresh();
+    syncAutoRefreshFromSettings();
+    applyFontSize();
     if (window.DataLayer && DataLayer.MODES) {
-      DataLayer.configure(DataLayer.MODES[settings.fetchMode] || DataLayer.MODES.balanced);
+      const mode = DataLayer.MODES[settings.fetchMode] || DataLayer.MODES.balanced;
+      DataLayer.configure(Object.assign({}, mode, { proxyPrefix: settings.proxyPrefix || '' }));
     }
     showToast(note || '已保存');
+  }
+
+  // ---------- 导出与批量已读 ----------
+  function exportNews() {
+    const list = state.news.filter(matchFilters);
+    if (!list.length) { showToast('没有可导出的新闻'); return; }
+    const lines = ['# 新闻导出', '', '导出时间：' + new Date().toLocaleString('zh-CN', { hour12: false }), '数量：' + list.length + ' 条', ''];
+    for (const it of list) {
+      const src = it.source || '';
+      const grade = it.grade || '';
+      const cats = (it.categories || []).map(c => CATEGORY_NAMES[c] || c).join('、');
+      const time = it.dateText || '';
+      lines.push('## ' + (it.title || '无标题'));
+      lines.push('');
+      lines.push('- 来源：' + src + (grade ? '（' + grade + '）' : ''));
+      if (cats) lines.push('- 分类：' + cats);
+      if (time) lines.push('- 时间：' + time);
+      if (it.link) lines.push('- 链接：' + it.link);
+      const summary = FeedParser.stripHtml(it.summary || '').trim();
+      if (summary) lines.push('', summary);
+      lines.push('', '---', '');
+    }
+    const md = lines.join('\n');
+    if (window.electronAPI && window.electronAPI.storage) {
+      const ts = new Date();
+      const p = (d) => String(d).padStart(2, '0');
+      const fname = 'exports/news_' + ts.getFullYear() + '-' + p(ts.getMonth() + 1) + '-' + p(ts.getDate()) + '_' + p(ts.getHours()) + p(ts.getMinutes()) + p(ts.getSeconds()) + '.md';
+      window.electronAPI.storage.write(fname, md).then(ok => {
+        showToast(ok ? '已导出到 data/' + fname : '导出失败');
+      });
+    } else {
+      const blob = new Blob([md], { type: 'text/markdown' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'news_export.md';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      showToast('已导出');
+    }
+  }
+  function markAllRead() {
+    const list = state.news.filter(matchFilters);
+    if (!list.length) { showToast('当前没有新闻'); return; }
+    for (const it of list) state.readKeys.set(favKey(it), Date.now());
+    Store.saveReadState(state.readKeys);
+    renderNews();
+    showToast('已标记 ' + list.length + ' 条为已读');
+  }
+  function moveFocus(dir) {
+    const cards = document.querySelectorAll('#news-grid .card[data-key]');
+    if (!cards.length) return;
+    if (state.focusIndex == null) state.focusIndex = -1;
+    state.focusIndex += dir;
+    if (state.focusIndex < 0) state.focusIndex = 0;
+    if (state.focusIndex >= cards.length) state.focusIndex = cards.length - 1;
+    cards.forEach(c => c.classList.remove('focused'));
+    const c = cards[state.focusIndex];
+    c.classList.add('focused');
+    c.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+  function isTypingTarget(e) {
+    const t = e.target;
+    if (!t) return false;
+    const tag = (t.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || t.isContentEditable;
+  }
+  function handleShortcut(e) {
+    if (e.key === 'Escape') { closeArticleModal(); closeHotModal(); return; }
+    if (isTypingTarget(e)) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 'r') { refresh('all'); return; }
+    if (k === 'f' && currentModalItem) { toggleFavorite(currentModalItem); return; }
+    if (k === 'j' || k === 'k') { moveFocus(k === 'j' ? 1 : -1); return; }
+    if (k === '?') { showToast('快捷键：R 刷新 · J/K 切换 · F 收藏 · Esc 关闭'); return; }
   }
 
   // ---------- 绑定 ----------
@@ -1227,6 +1695,14 @@
       el('date-from').value = ''; el('date-to').value = ''; state.filters.dateFrom = ''; state.filters.dateTo = ''; state.calendarDate = null;
       renderCalendar(); resetAndRenderNews();
     });
+    // 日期快捷范围（获取某一天 / 某时段）
+    const rangeQuick = el('range-quick');
+    if (rangeQuick) rangeQuick.addEventListener('click', (e) => {
+      const chip = e.target.closest('[data-range]');
+      if (chip) applyRangeChip(chip.dataset.range);
+    });
+    const refreshRangeBtn = el('refresh-range-btn');
+    if (refreshRangeBtn) refreshRangeBtn.addEventListener('click', refreshCurrentRange);
     el('src-all').addEventListener('click', () => {
       state.filters.sources.clear(); setActive('src-all', el('src-all'));
       el('source-filter-chips').querySelectorAll('.chip').forEach(c => c.classList.remove('selected'));
@@ -1244,21 +1720,46 @@
     el('refresh-hot-btn').addEventListener('click', () => refresh('hot'));
     el('refresh-all-btn').addEventListener('click', () => refresh('all'));
 
+    // 导出 / 批量已读 / 清空收藏
+    const exportBtn = el('export-news-btn');
+    if (exportBtn) exportBtn.addEventListener('click', exportNews);
+    const markAllReadBtn = el('mark-all-read-btn');
+    if (markAllReadBtn) markAllReadBtn.addEventListener('click', markAllRead);
+    const clearFavsBtn = el('clear-favs-btn');
+    if (clearFavsBtn) clearFavsBtn.addEventListener('click', () => {
+      if (state.favorites.size === 0) { showToast('暂无收藏'); return; }
+      if (confirm('确定清空全部收藏？此操作不可撤销。')) clearFavorites();
+    });
+
     // 弹窗
     el('modal-close').addEventListener('click', closeArticleModal);
     el('modal-close-btn').addEventListener('click', closeArticleModal);
     el('modal-backdrop').addEventListener('click', closeArticleModal);
     el('modal-body').addEventListener('scroll', () => {
+      const body = el('modal-body');
       const h = el('modal-hero');
-      if (el('modal-body').scrollTop > 120) h.classList.add('scrolled');
-      else h.classList.remove('scrolled');
+      const top = body.scrollTop;
+      if (!heroScrolled && top > 120) {
+        heroScrolled = true;
+        h.classList.add('scrolled');
+        // 英雄区折叠会改变上方高度、把 scrollTop 拖回阈值以下造成反复抽搐；
+        // 补偿 scrollTop 锁定视口内容，彻底消除抖动
+        body.scrollTop = top + (320 - 68);
+      } else if (heroScrolled && top < 8) {
+        heroScrolled = false;
+        h.classList.remove('scrolled');
+      }
     });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeArticleModal(); closeHotModal(); } });
+    document.addEventListener('keydown', handleShortcut);
 
     // 热搜弹窗
     el('hot-close').addEventListener('click', closeHotModal);
     el('hot-close-btn').addEventListener('click', closeHotModal);
     el('hot-backdrop').addEventListener('click', closeHotModal);
+
+    // 更新状态提示弹窗
+    el('update-status-ok').addEventListener('click', hideUpdateStatusModal);
+    el('update-status-backdrop').addEventListener('click', hideUpdateStatusModal);
 
     // 添加自定义信源
     el('add-source-btn').addEventListener('click', openAddSourceModal);
@@ -1295,14 +1796,51 @@
     bindAutoSave('set-refresh-interval', '刷新间隔已保存');
     bindAutoSave('set-image-caching', '图片缓存策略已保存');
     bindAutoSave('set-animations', '动画设置已保存');
+    el('set-calendar-wave').addEventListener('change', () => {
+      settings.calendarWave = el('set-calendar-wave').checked;
+      renderCalendar();
+      persistSettings('日历水波效果已保存');
+    });
     bindAutoSave('set-smart-clean', '正文清理已保存');
     bindAutoSave('set-background-refresh', '后台刷新已保存');
     bindAutoSave('set-fetch-mode', '获取模式已保存');
+    bindAutoSave('set-fetch-month', '月窗口已保存');
     bindAutoSave('set-hot-maxitems', '热搜条数已保存');
     bindAutoSave('set-geo-provider', '地图服务商已保存');
     bindAutoSave('set-geo-key', '地图 Key 已保存');
     bindAutoSave('set-geo-style', '地图样式已保存');
     bindAutoSave('set-datadir', '数据目录已保存');
+    bindAutoSave('set-font-size', '字号已保存');
+    bindAutoSave('set-proxy-prefix', '代理前缀已保存');
+    bindAutoSave('set-watchlist', '订阅关键词已保存');
+    // 更新线路：首选(GitHub) / 备用(Gitee) 分段开关
+    const lineToggle = el('update-line-toggle');
+    if (lineToggle) {
+      const toggleLine = () => {
+        const secondary = !lineToggle.classList.contains('is-secondary');
+        lineToggle.classList.toggle('is-secondary', secondary);
+        lineToggle.setAttribute('aria-checked', String(!secondary));
+        persistSettings(secondary ? '已切换至备用线路（Gitee）' : '已切换至首选线路（GitHub）');
+      };
+      lineToggle.addEventListener('click', toggleLine);
+      lineToggle.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleLine(); }
+      });
+    }
+    // 立即检查更新按钮
+    const checkUpdateBtn = el('check-update-btn');
+    if (checkUpdateBtn) {
+      checkUpdateBtn.addEventListener('click', () => {
+        if (window.electronAPI && window.electronAPI.checkForUpdates) {
+          checkUpdateBtn.disabled = true;
+          setUpdateStatus('');
+          hideUpdateBar();
+          window.electronAPI.checkForUpdates().finally(() => {
+            checkUpdateBtn.disabled = false;
+          });
+        }
+      });
+    }
     // 热搜开关（事件委托）
     el('settings-hot').addEventListener('change', (e) => {
       if (e.target.matches('input[type="checkbox"]')) persistSettings('热搜设置已保存');
@@ -1367,13 +1905,101 @@
     else window.open(url, '_blank', 'noopener');
   }
 
+  // 更新提示条
+  let pendingUpdateInfo = null;
+  function showUpdateBanner(info) {
+    const banner = el('update-banner');
+    const text = el('update-text');
+    const dl = el('update-download');
+    const prog = el('update-progress');
+    const instBtn = el('update-installer');
+    const dismiss = el('update-dismiss');
+    if (!banner || !text || !dl) return;
+    pendingUpdateInfo = info;
+    text.textContent = `发现新版本 v${info.latestVersion}（当前 v${info.currentVersion}）${info.releaseNotes ? ' · ' + info.releaseNotes : ''}`;
+    banner.classList.remove('hidden');
+    if (prog) { prog.classList.add('hidden'); prog.textContent = ''; }
+
+    // 大版本（Electron 运行时变化）→ 只能走完整安装包
+    if (info.electronMismatch) {
+      dl.classList.add('hidden');
+      instBtn.classList.remove('hidden');
+      instBtn.onclick = () => {
+        const url = info.installer && (info.installer.mirror || info.installer.url);
+        if (window.electronAPI && window.electronAPI.openUpdateDownload && url) {
+          window.electronAPI.openUpdateDownload(url);
+        } else if (url) {
+          openLink(url);
+        }
+        banner.classList.add('hidden');
+      };
+    } else {
+      dl.classList.remove('hidden');
+      instBtn.classList.add('hidden');
+      dl.disabled = false;
+      dl.textContent = '更新并重启';
+      dl.onclick = () => startInAppUpdate(info);
+    }
+
+    dismiss.onclick = () => {
+      banner.classList.add('hidden');
+      if (window.electronAPI && window.electronAPI.dismissUpdate) {
+        window.electronAPI.dismissUpdate(info.latestVersion);
+      }
+    };
+  }
+
+  async function startInAppUpdate(info) {
+    const dl = el('update-download');
+    const prog = el('update-progress');
+    if (!window.electronAPI || !window.electronAPI.downloadUpdate) {
+      const url = info.installer && (info.installer.mirror || info.installer.url);
+      if (url) openLink(url);
+      return;
+    }
+    dl.disabled = true;
+    dl.textContent = '准备中…';
+    if (prog) { prog.classList.remove('hidden'); prog.textContent = '开始下载…'; }
+    // 进度由 init() 中全局 onUpdateProgress 统一处理，此处不再重复注册
+
+    let res = null;
+    try { res = await window.electronAPI.downloadUpdate(info); }
+    catch (e) { res = { ok: false, reason: e.message }; }
+
+    if (res && res.restart) {
+      dl.textContent = '即将重启…';
+      if (prog) prog.textContent = '更新完成，正在重启';
+      return; // 主进程会自行 relaunch
+    }
+    if (res && res.needsInstaller) {
+      dl.disabled = false;
+      dl.textContent = '更新并重启';
+      if (prog) prog.classList.add('hidden');
+      const url = info.installer && (info.installer.mirror || info.installer.url);
+      if (url) openLink(url);
+      bannerHint('需下载完整安装包（大版本更新），已打开下载页');
+      return;
+    }
+    dl.disabled = false;
+    dl.textContent = '重试';
+    if (prog) prog.textContent = '更新失败：' + ((res && res.reason) || '未知错误');
+  }
+
+  function bannerHint(msg) {
+    const prog = el('update-progress');
+    if (prog) { prog.classList.remove('hidden'); prog.textContent = msg; }
+  }
+
   // ---------- 启动 ----------
   async function init() {
     settings = await Store.loadSettings();
+    Store.setSettings(settings); // 同步窗口配置给数据层
     // 应用新闻获取模式（并发数 + 条件请求）到数据层
     if (window.DataLayer && DataLayer.MODES) {
-      DataLayer.configure(DataLayer.MODES[settings.fetchMode] || DataLayer.MODES.balanced);
+      const mode = DataLayer.MODES[settings.fetchMode] || DataLayer.MODES.balanced;
+      DataLayer.configure(Object.assign({}, mode, { proxyPrefix: settings.proxyPrefix || '' }));
     }
+    applyFontSize();
     const favs = await Store.loadFavorites();
     // 同步后台刷新开关到主进程（关闭窗口是否保留进程），并监听托盘"刷新"指令
     if (window.electronAPI && window.electronAPI.setBackgroundRefresh) {
@@ -1382,7 +2008,34 @@
     if (window.electronAPI && window.electronAPI.onTrayRefresh) {
       window.electronAPI.onTrayRefresh(() => refresh('all'));
     }
+    // 监听主进程推送的更新通知
+    if (window.electronAPI && window.electronAPI.onUpdateAvailable) {
+      window.electronAPI.onUpdateAvailable(info => showUpdateBanner(info));
+    }
+    if (window.electronAPI && window.electronAPI.onUpdateStatusMessage) {
+      window.electronAPI.onUpdateStatusMessage(data => {
+        // 非静默消息才弹窗；过程中的状态只更新设置页标签
+        if (!data.silent) showUpdateStatusModal(data);
+        // 同步更新设置页状态标签
+        if (data.type === 'checking') setUpdateStatus(data.title || '正在检查…', 'checking');
+        else if (data.type === 'checking-source') setUpdateStatus('连接失败，正在替换备用源', 'switching');
+        else if (data.type === 'connected') { setUpdateStatus('连接成功，正在获取更新', 'connected'); showUpdateBar(); }
+        else if (data.type === 'success') { setUpdateStatus('下载完成，正在安装…', 'success'); markUpdateBarDone(); }
+        else if (data.type === 'warning') setUpdateStatus(data.title || '无法连接，请检查网络', 'fail');
+        else if (data.type === 'info') setUpdateStatus(data.title || '已是最新版本', '');
+      });
+    }
+    if (window.electronAPI && window.electronAPI.onUpdateProgress) {
+      window.electronAPI.onUpdateProgress((pct) => {
+        // 统一更新设置页条形进度条与顶部 banner 文本
+        setUpdateBar(pct);
+        const prog = el('update-progress');
+        if (prog) prog.textContent = '下载中 ' + pct + '%';
+      });
+    }
     favs.forEach(it => state.favorites.set(favKey(it), it));
+    state.readKeys = await Store.loadReadState();
+    state.sourceHealth = await Store.loadSourceHealth();
     userSources = await Store.loadUserSources();
     userSourceIds = new Set(userSources.map(s => s.id));
     if (userSources.length) SOURCES.NEWS_SOURCES = SOURCES.NEWS_SOURCES.concat(userSources);

@@ -107,6 +107,9 @@
   // 站点特定的正文容器选择器（域名 -> 选择器数组）
   const SITE_SELECTORS = {
     'france24.com': ['article .article__body', 'article', '[class*="article-body"]', '[class*="article__body"]', '.main-content'],
+    'japantimes.co.jp': ['.article-body', 'article'],
+    'variety.com': ['[itemprop="articleBody"]', '.article__body', '#article-body', 'article'],
+    'polygon.com': ['#article-body', 'section.article-body', '[itemprop="articleBody"]', 'article'],
     'nasa.gov': ['.article-body', '.entry-content', '.content-area', 'article', '#main-content'],
     'reuters.com': ['article', '[data-testid="paragraph-0"]', '.article-body__content__', '[class*="article-body"]', '[class*="ArticleBody"]'],
     'apnews.com': ['.RichTextStoryBody', 'article', '[class*="RichText"]'],
@@ -120,12 +123,12 @@
     'federalreserve.gov': ['#article', '.container', '#main-content', '.panel panel-default', '.panel'],
     'whitehouse.gov': ['.briefing-room__body', '#main-content', 'article', '.body-content'],
     'home.treasury.gov': ['#main-content', '.press-release', 'article', '.body-content'],
-    'ecb.europa.eu': ['.content', '#main-wrapper', 'article'],
+    'ecb.europa.eu': ['.section', '.content-box', '.content', '#main-wrapper', 'article'],
     'ec.europa.eu': ['.ecl-paragraph', '#main-content', '.content'],
     'mofa.go.jp': ['#contents-main', '#main-content', '.contents'],
     'gov.uk': ['.govuk-grid-column-two-thirds', '#main-content', 'article'],
-    'tass.com': ['.article__content', '.article-content', '.text-content', 'article', '#main-content', '.container'],
-    'tass.ru': ['.article__content', '.article-content', '.text-content', 'article', '#main-content', '.container']
+    'tass.com': ['.text-content', '.text-block'],
+    'tass.ru': ['.text-content', '.text-block']
   };
 
   // 智能正文清理：只保留标题、发布者、时间、正文段落与相关图片
@@ -160,7 +163,7 @@
       const tag = el.tagName.toLowerCase();
       const cls = (el.getAttribute('class') || '');
       const id = (el.getAttribute('id') || '');
-      const text = (el.innerText || '').trim();
+      const text = (el.innerText || el.textContent || '').trim();
       const combinedLower = (cls + ' ' + id).toLowerCase();
 
       // 命中噪声 class/id 直接删除
@@ -201,7 +204,7 @@
         const links = el.querySelectorAll('a');
         // 仅当链接明显占主导（>75%）且不是富文本段落时才删，避免误伤含邮件/分享链接的短新闻
         if (links.length >= 2 && text.length > 0 && text.length < 400) {
-          const linkText = Array.from(links).reduce((s, a) => s + (a.innerText || '').length, 0);
+          const linkText = Array.from(links).reduce((s, a) => s + (a.innerText || a.textContent || '').length, 0);
           if (linkText / text.length > 0.75) { el.remove(); return; }
         }
       }
@@ -234,7 +237,7 @@
 
     // 5) 清理后删除空容器
     doc.querySelectorAll('p, div, section, li, h1, h2, h3, h4, h5, h6, figcaption').forEach(el => {
-      if ((el.innerText || '').trim().length === 0 && el.querySelectorAll('img').length === 0) el.remove();
+      if ((el.innerText || el.textContent || '').trim().length === 0 && el.querySelectorAll('img').length === 0) el.remove();
     });
 
     return doc.body.innerHTML;
@@ -275,40 +278,54 @@
       '.main-content', '#article-body', '#main-content', '.body-content'
     ];
 
-    let selectors = genericSelectors;
-    try {
-      const host = new URL(baseUrl).hostname.replace(/^www\./, '');
-      for (const domain of Object.keys(SITE_SELECTORS)) {
-        if (host.endsWith(domain)) {
-          selectors = SITE_SELECTORS[domain].concat(genericSelectors);
-          break;
-        }
-      }
-    } catch (_) { /* ignore */ }
-
-    // 2/3) 在所有候选（站点特定选择器 + 通用选择器 +  div/section/main）中
-    // 按 "文本长度 + 段落数" 打分，取最高分作为正文容器，避免首个命中但过小
+    // 2/3) 打分选正文容器：站点特定选择器优先（避免被含导航/相关新闻的大容器压过），
+    //      未命中时再退回通用选择器与 div/section/main 兜底
     let best = null;
     let maxScore = 0;
     function scoreEl(el) {
       if (!el) return 0;
       if (el.closest('header, footer, nav, aside')) return 0;
-      const text = (el.innerText || '').trim();
+      const text = (el.innerText || el.textContent || '').trim();
       const paras = el.querySelectorAll('p').length;
       if (text.length < 60 || paras < 1) return 0;
       return text.length + paras * 300;
     }
     const seen = new Set();
-    for (const sel of selectors) {
-      try {
-        const el = doc.querySelector(sel);
-        if (!el || seen.has(el)) continue;
-        seen.add(el);
-        const s = scoreEl(el);
-        if (s > maxScore) { maxScore = s; best = el; }
-      } catch (_) { /* invalid selector in older engines */ }
+
+    // 1) 站点特定选择器优先：命中且内容达标即直接采用
+    let domainHit = null;
+    try {
+      const host = new URL(baseUrl).hostname.replace(/^www\./, '');
+      for (const domain of Object.keys(SITE_SELECTORS)) {
+        if (host.endsWith(domain)) { domainHit = domain; break; }
+      }
+    } catch (_) { /* ignore */ }
+    if (domainHit) {
+      for (const sel of SITE_SELECTORS[domainHit]) {
+        try {
+          const el = doc.querySelector(sel);
+          if (!el || seen.has(el)) continue;
+          seen.add(el);
+          const s = scoreEl(el);
+          if (s >= 800) { best = el; maxScore = s; break; } // 按站点选择器顺序，取首个达标容器
+        } catch (_) { /* ignore */ }
+      }
     }
-    // 若站点选择器得分不高，再用通用块兜底
+
+    // 2) 通用选择器
+    if (!best) {
+      for (const sel of genericSelectors) {
+        try {
+          const el = doc.querySelector(sel);
+          if (!el || seen.has(el)) continue;
+          seen.add(el);
+          const s = scoreEl(el);
+          if (s > maxScore) { maxScore = s; best = el; }
+        } catch (_) { /* invalid selector in older engines */ }
+      }
+    }
+
+    // 3) 兜底：div / section / main
     if (!best || maxScore < 2000) {
       for (const el of doc.querySelectorAll('div, section, main')) {
         if (seen.has(el)) continue;
