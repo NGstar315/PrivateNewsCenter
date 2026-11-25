@@ -8,8 +8,8 @@
     "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.9/app.asar"
   },
   "installer": {
-    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.9/%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB%E4%B8%AD%E5%BF%83-Setup-1.1.9.exe",
-    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.9/%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB%E4%B8%AD%E5%BF%83-Setup-1.1.9.exe"
+    "url": "https://github.com/NGstar315/PrivateNewsCenter/releases/download/v1.1.9/PrivateNewsCenter-Setup-1.1.9.exe",
+    "mirror": "https://gitee.com/NGstar/PrivateNewsCenter/releases/download/v1.1.9/PrivateNewsCenter-Setup-1.1.9.exe"
   },
   "mandatory": false
 }
